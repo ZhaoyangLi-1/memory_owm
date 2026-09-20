@@ -1,0 +1,115 @@
+# All fixed variables of the experiment (spec sections 6 and 16.2).
+# Paths are relative to the project root unless absolute.
+
+# Heavy / temporary files (frame cache ~135 GB, generated test demos ~45 GB, checkpoints, evidence) live on the bulk volume
+# ~/data (-> /common/users/zl1308); the home volume has a 208 GB quota. Only code and configs stay in the project folder.
+paths:
+  storage_root: /common/home/zl1308/data/owm_memory_data
+  train_h5_dir: /common/home/zl1308/data/robomme_data_h5      # official 16 x 100 demos
+  test_h5_dir: /common/home/zl1308/data/owm_memory_data/data/generated/val   # plan A: generated with the built-in planner
+  robomme_repo: /common/home/zl1308/Projects/robomme_benchmark
+  cjepa_repo: /common/home/zl1308/Projects/cjepa
+  lpwm_repo: /common/home/zl1308/Projects/lpwm
+  data_dir: /common/home/zl1308/data/owm_memory_data/data
+  cache_dir: /common/home/zl1308/data/owm_memory_data/cache
+  output_dir: /common/home/zl1308/data/owm_memory_data/outputs
+
+tasks: [PickXtimes, VideoUnmask, VideoUnmaskSwap, ButtonUnmaskSwap, VideoRepick, MoveCube]
+wm_train_tasks: all_16
+# wm_train_tasks: [PickXtimes, VideoUnmask, VideoUnmaskSwap, ButtonUnmaskSwap, VideoRepick, MoveCube]
+split_plan: A                  # A: offline test set generated for the official val seeds; B: fixed 70/30 split
+split_seed: 0
+plan_b_train_episodes: 70
+wm_val_fraction: 0.05          # train episodes held out for the self-supervised validation loss only
+
+inputs:
+  camera: front_rgb
+  use_actions: false
+  use_proprio_in_wm: false
+  use_language_in_wm: false
+  image_size: {lpwm: 256, videosaur: 252, astra: 256}
+
+temporal:
+  stride: 16
+  train_offset: random         # offset in [0, stride-1]
+  eval_alignment: backward_from_decision
+  context_frames: 80
+  future_offsets: [16, 32, 48, 64]   # K = 4. Spec default was [16, 32]; reading rule 1 fired: with K = 2 the REAL future identifies the
+                               # answer in only 65% (ButtonUnmaskSwap) / 79% (VideoRepick) / 64% (MoveCube) of the cases (oracle rule,
+                               # RUN.md section 4A), at t+64 in 100 / 98 / 94%. Applies to all conditions and both world models.
+
+cjepa:
+  videosaur_config: configs/videosaur_robomme.yml
+  num_slots: 20                # N = n_max + 3; P2 measured n_max = 17 (VideoRepick hard: 15 cubes + button + arm)
+  slot_dim: 128
+  # history window W = temporal.context_frames, future frames F = len(temporal.future_offsets) (single source of truth)
+  num_masked_slots: null       # null -> num_slots // 4
+  identity_anchor: earliest_frame
+  mask_sampling: fixed         # fixed = official code behaviour (seeded RNG re-created per call); random = resample each step
+  aux_action: false
+  aux_proprio: false
+  predictor: {depth: 6, heads: 16, dim_head: 64, mlp_dim: 2048, dropout: 0.1}
+  train: {batch_size: 32, lr: 5.0e-4, max_epochs: 30, steps_per_epoch: 2000, num_workers: 4, seed: 0}
+  slot_offsets: all            # offsets (0..stride-1) at which train slots are extracted; "all" or a list
+
+lpwm:
+  base_config: configs/lpwm_robomme.json
+  conditioning: none
+  max_particles: official_default
+  latent_action_at_eval: prior_only
+  rollout_samples: 5
+  rollout_seeds: [0, 1, 2, 3, 4]
+
+gt:
+  visibility: segmentation     # fallback: depth (tolerance 10 mm)
+  min_visible_pixels: 20
+  depth_tolerance_mm: 10
+  id_range: 32
+  target_match_max_px: 20
+
+readout:
+  d_model: 256
+  layers: 2
+  heads: 4
+  ffn: 1024
+  dropout: 0.1
+  fourier_freqs: 6             # spec: 16. With 16 bands (up to 2^15*pi) positions act as a hash, the head memorises the
+                               # ~100 training layouts and the CEILING stays at chance; 4-6 bands pass the >= 95% gate (see RUN.md)
+  resample_ids: true           # re-draw the random GT identity numbers on every training draw (needed for the ceiling gate)
+  optimizer: {name: adamw, lr: 3.0e-4, weight_decay: 0.01}
+  schedule: {warmup_steps: 200, type: cosine}
+  batch_size: 64
+  max_steps: 5000
+  eval_every: 100
+  early_stop: {metric: val_loss, patience_steps: 1000}
+  val_fraction: 0.15
+  train_on: all_decisions      # the main metric is reported on memory-critical decisions only
+  aug_offsets: [4, 8, 12, 16]  # training-only pseudo-decisions at t + d inside the same subtask ([] = spec behaviour)
+  seeds: [0, 1, 2]
+
+astra:
+  model: gpt-6-astra
+  reasoning_effort: high       # frozen after preregistration
+  max_images: 80
+  retries: 2
+  price_per_mtok: {input: 10.0, output: 50.0}
+
+closed_loop:
+  dataset: test
+  max_steps: 1300
+  episodes: 50
+
+actions:                       # optional experiment (spec section 14)
+  source: joint_action
+  chunk: 16                    # 16 x 8 = 128-d action vector per sampled step
+  train_drop_prob: 0.5
+
+stats:
+  bootstrap_samples: 10000
+  bootstrap_unit: episode
+  thresholds: {ceiling_min: 0.95, prediction_check_min: 0.70, s_partial: 0.5}
+  min_prediction_check_decisions: 30
+  # Strata removed from the main analysis by reading rule 1 (ceiling cannot reach 95% there), decided from the ceiling
+  # alone, before any world-model result. VideoRepick hard = 15 tightly packed cubes (~4 cm apart): the oracle rule finds
+  # the answer in the real future (100%), but the readout head reaches only ~14% there (97-100% on easy / medium).
+  exclude: {VideoRepick: [hard]}

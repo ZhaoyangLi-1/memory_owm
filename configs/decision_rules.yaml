@@ -1,0 +1,45 @@
+# Human-readable decision rules (implementation: owm/data/decision_rules.py). Verified on the HDF5 data (spec 4.5):
+#
+# What a "decision frame" is
+#   * `action/choice_action` is filled on EVERY frame ({"choice": "A", "point": [y, x]}; upper-case label; the point is
+#     re-projected every frame and follows the object; "" / [] while the conditioning video plays).
+#   * `info/is_subgoal_boundary` is True on the FIRST frame of a new planner-view subtask -> decision frame t.
+#     The h5 frame k holds the observation AFTER action k, so frame t is one simulation step into the new subtask.
+#   * Excluded: boundaries inside the conditioning video (the robot is being shown a demo, not deciding), the
+#     boundary at frame 0 with an empty choice, and the trailing boundary whose simple_subgoal is
+#     "All tasks completed" (it repeats the last decision).
+#   * timesteps and episodes are 0-based in the files (the spec assumed 1-based): frame index == timestep index.
+#   * a point is stored even for options with need_parameter == false; it is ignored for those.
+#
+# decision_type: memory_critical (main metric) | non_critical (prediction check, pointer decisions only)
+#                | memory_secondary (needs memory, not the pre-registered main decision) | other (training only)
+
+PickXtimes:
+  options: {a: "pick up the cube [point]", b: "place the cube onto the target", c: "press the button to stop"}
+  memory_critical: "the decision right after every b: a (pick again) or c (stop). Memory shows in the LABEL."
+  non_critical: "the first a of the episode (the target-colour cube is in view)"
+VideoUnmask:
+  options: {a: "pick up the container [point]", b: "put down the container"}
+  memory_critical: "the first a after the video. Memory shows in the POINT."
+  memory_secondary: "the second a of two-pick episodes"
+  non_critical: "none -> prediction check reported as 'insufficient samples'"
+VideoUnmaskSwap:
+  options: {a: "pick up the container [point]", b: "put down the container"}
+  memory_critical: "the first a after the video (POINT)"
+  memory_secondary: "the second a of two-pick episodes"
+  non_critical: "none"
+ButtonUnmaskSwap:
+  options: {a: "press the first button", b: "press the second button", c: "pick up the container [point]", d: "put down the container"}
+  memory_critical: "the first c (after both buttons were pressed; cubes were covered and swapped during execution) (POINT)"
+  memory_secondary: "the second c of two-pick episodes"
+  non_critical: "none"
+VideoRepick:
+  options: {a: "pick up the cube [point]", b: "put it down", c: "press the button to finish"}
+  memory_critical: "the first a after the video (POINT). In easy/medium all cubes have the same colour."
+  non_critical: "every later a (the cube was just put down; short-term tracking suffices)"
+MoveCube:
+  options: {a: "pick up the peg", b: "hook the cube to the target with the peg", c: "close gripper and push the cube to the target",
+            d: "pick up the cube", e: "place the cube onto the target"}
+  note: "NO option needs a parameter. Manner -> option sequence: hook = a,b ; push = c ; pick-and-place = d,e."
+  memory_critical: "the first decision after the video: a (hook) / c (push) / d (pick-place). Memory shows in the LABEL."
+  non_critical: "none (no pointer decisions) -> prediction check 'insufficient samples'"

@@ -1,0 +1,66 @@
+# PRE-REGISTRATION (spec section 2, 6, 13). Commit this file BEFORE looking at any test result; never edit afterwards.
+version: "Final 1.0"
+registered_on: "09/19/2026"            # fill in the commit date
+question: >
+  Do the object-centric world models LPWM and C-JEPA fail at RoboMME memory decisions, and if so is it because they
+  cannot see / cannot predict, or because they cannot remember?
+
+primary_metric:
+  name: memory-critical decision accuracy
+  correct_if: "label == choice_action.choice AND (label needs no parameter OR selected candidate == GT object nearest to choice_action.point)"
+  decisions: configs/decision_rules.yaml (memory_critical)
+  readout_seeds: [0, 1, 2]     # per-decision correctness = mean over the 3 seeds
+memory_score: "S = (Acc_wm - Acc_floor) / (Acc_ceiling - Acc_floor)"
+prediction_check:
+  decisions: non_critical AND need_parameter
+  candidates: identity + position only (type and colour zeroed)
+  label: given (pointer only)
+  chance: 1 / number of candidates
+  min_decisions: 30            # fewer -> "insufficient samples"
+
+reading_rules:                 # in order, first hit wins
+  1: {if: "ceiling < 0.95", then: "two future steps do not reveal the answer / label rule wrong -> K = 4 for ALL conditions and BOTH models, or fix; else drop the task"}
+  2: {if: "floor significantly above chance", then: "current frame leaks the answer -> exclude this decision class"}
+  3: {if: "CI(S) contains 0 AND prediction check < 0.70", then: "cannot see / cannot predict"}
+  4: {if: "CI(S) contains 0 AND prediction check >= 0.70", then: "cannot remember"}
+  5: {if: "S significantly > 0 AND S < 0.5", then: "partially remembers"}
+  6: {if: "S >= 0.5", then: "remembers"}
+does_poorly: [3, 4]
+
+statistics:
+  ci: "paired bootstrap over episodes, 10000 resamples, all three accuracies and S recomputed per resample"
+  significant: "95% CI excludes the comparison value"
+  chance: {pointer: "mean of 1/n_candidates", label: "majority-class share in the training set"}
+  wm_seeds: "1; train a 2nd seed and pool if CI(S) straddles 0 or 0.5"
+
+fixed_variables:
+  wm_input: front_rgb only (no actions, proprioception, language)
+  temporal: {stride: 16, train_offset: random, eval: backward from the decision frame, context_frames: 80, future: [t+16, t+32, t+48, t+64]}   # K raised 2 -> 4 by reading rule 1 BEFORE any world-model result existed (RUN.md 4A)
+  candidates: GT visible objects at frame t, identical in all conditions
+  hyperparameters: official configs; only the items listed in spec section 3 change
+  wm_checkpoint: last checkpoint after the self-supervised validation loss has plateaued; never chosen by downstream accuracy
+  readout: identical architecture/training in all conditions; checkpoint = lowest validation loss
+  cjepa_note: "history window 80 (official: 3 / 6) is outside the range tested in the paper — must be stated in every report"
+  astra: {model: gpt-6-astra, reasoning_effort: high, calls_per_decision: 1, retries: 2}
+
+expectations:
+  floor: near chance
+  ceiling: ">= 95%"
+  world_models: to be measured
+
+results_table_template: |
+  | | PickXtimes | VideoUnmask | VideoUnmaskSwap | ButtonUnmaskSwap | VideoRepick | MoveCube |
+  |---|---|---|---|---|---|---|
+  | chance | | | | | | |
+  | floor | | | | | | |
+  | C-JEPA | | | | | | |
+  | LPWM | | | | | | |
+  | ceiling | | | | | | |
+  | GPT-6 Astra (setting A) | | | | | | |
+  | GPT-6 Astra (setting A, decision frame only) | | | | | | |
+  | C-JEPA S | | | | | | |
+  | LPWM S | | | | | | |
+  | C-JEPA prediction check | | | | | | |
+  | LPWM prediction check | | | | | | |
+  | C-JEPA verdict | | | | | | |
+  | LPWM verdict | | | | | | |

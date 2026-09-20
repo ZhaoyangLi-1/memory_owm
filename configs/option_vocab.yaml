@@ -1,0 +1,81 @@
+PickXtimes:
+  fixed: true
+  n_episodes: 100
+  options:
+  - label: a
+    action: pick up the cube
+    need_parameter: true
+  - label: b
+    action: place the cube onto the target
+    need_parameter: false
+  - label: c
+    action: press the button to stop
+    need_parameter: false
+VideoUnmask:
+  fixed: true
+  n_episodes: 100
+  options:
+  - label: a
+    action: pick up the container
+    need_parameter: true
+  - label: b
+    action: put down the container
+    need_parameter: false
+VideoUnmaskSwap:
+  fixed: true
+  n_episodes: 100
+  options:
+  - label: a
+    action: pick up the container
+    need_parameter: true
+  - label: b
+    action: put down the container
+    need_parameter: false
+ButtonUnmaskSwap:
+  fixed: true
+  n_episodes: 100
+  options:
+  - label: a
+    action: press the first button
+    need_parameter: false
+  - label: b
+    action: press the second button
+    need_parameter: false
+  - label: c
+    action: pick up the container
+    need_parameter: true
+  - label: d
+    action: put down the container
+    need_parameter: false
+VideoRepick:
+  fixed: true
+  n_episodes: 100
+  options:
+  - label: a
+    action: pick up the cube
+    need_parameter: true
+  - label: b
+    action: put it down
+    need_parameter: false
+  - label: c
+    action: press the button to finish
+    need_parameter: false
+MoveCube:
+  fixed: true
+  n_episodes: 100
+  options:
+  - label: a
+    action: pick up the peg
+    need_parameter: false
+  - label: b
+    action: hook the cube to the target with the peg
+    need_parameter: false
+  - label: c
+    action: close gripper and push the cube to the target
+    need_parameter: false
+  - label: d
+    action: pick up the cube
+    need_parameter: false
+  - label: e
+    action: place the cube onto the target
+    need_parameter: false
