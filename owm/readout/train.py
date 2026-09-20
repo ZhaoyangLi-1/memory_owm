@@ -11,6 +11,8 @@ import torch
 from owm.config import load_cfg, output_dir
 from owm.readout.dataset import DecisionData, is_check
 from owm.readout.model import Readout, count_parameters, readout_loss
+from owm.wandb_utils import flat_config
+from owm.wandb_utils import init as wandb_init
 from owm.wm.evidence import D_GT
 
 
@@ -42,8 +44,15 @@ def eval_loss(model, data, idx, need, device, pointer_only, bs=256):
     return tot / max(n, 1)
 
 
+def wandb_run(task: str, condition: str, seed: int, **config):
+    """One wandb run per (task, condition, seed), grouped so the 3 seeds show up together."""
+    return wandb_init(f"{task}/{condition}/s{seed}", "readout", group=f"{task}/{condition}",
+                      tags=[task, condition], config=dict(task=task, condition=condition, seed=seed, **config))
+
+
 def train_one(task: str, condition: str, seed: int, data: DecisionData | None = None, device: str = "cuda",
-              verbose: bool = True) -> dict:
+              verbose: bool = True, wb=None) -> dict:
+    """`wb`: an existing wandb Run to log into; if None a run is created and finished here."""
     cfg = load_cfg().readout
     data = data or DecisionData(task, condition)
     tr, va = data.split_indices("train"), data.split_indices("val")
@@ -60,6 +69,10 @@ def train_one(task: str, condition: str, seed: int, data: DecisionData | None = 
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: (s + 1) / warm if s < warm else 0.5 * (1 + math.cos(math.pi * (s - warm) / max(total - warm, 1))))
 
+    own_run = wb is None
+    wb = wb or wandb_run(task, condition, seed)
+    wb.summary(dict(flat_config(dict(cfg)), n_train=len(tr), n_val=len(va), n_params=count_parameters(model),
+                    d_evid=data.d_evid, pointer_only=pointer_only))
     best, best_step, best_state = float("inf"), 0, None
     for step in range(1, total + 1):
         model.train()
@@ -76,6 +89,8 @@ def train_one(task: str, condition: str, seed: int, data: DecisionData | None = 
             if v < best - 1e-6:
                 best, best_step = v, step
                 best_state = {k: t.detach().cpu().clone() for k, t in model.state_dict().items()}
+            wb.log(dict(train_loss=loss.item(), val_loss=v, best_val_loss=best,
+                        lr=sched.get_last_lr()[0]), step=step)
             if verbose and step % 500 == 0:
                 print(f"  [{task}/{condition}/s{seed}] step {step} train {loss.item():.4f} val {v:.4f} (best {best:.4f} @ {best_step})")
             if step - best_step >= cfg.early_stop.patience_steps:
@@ -85,6 +100,9 @@ def train_one(task: str, condition: str, seed: int, data: DecisionData | None = 
     torch.save(dict(state=best_state, stats=data.stats, labels=data.labels, d_goal=data.d_goal, d_evid=data.d_evid,
                     task=task, condition=condition, seed=seed, best_val_loss=best, best_step=best_step,
                     n_params=count_parameters(model), n_train=len(tr), n_val=len(va)), out)
+    wb.summary(dict(best_val_loss=best, best_step=best_step, stopped_at_step=step))
+    if own_run:
+        wb.finish()
     return dict(task=task, condition=condition, seed=seed, best_val_loss=best, best_step=best_step,
                 n_params=count_parameters(model), n_train=len(tr), n_val=len(va))
 

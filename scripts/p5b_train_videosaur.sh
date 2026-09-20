@@ -15,9 +15,15 @@ VSZ=$($OWM_PY -c "import json;print(json.load(open('$INFO'))['val']['samples'])"
 TR=$(printf "%s/train/robomme-train-{000000..%06d}.tar" "$SHARD_DIR" "$NTR")
 VA=$(printf "%s/val/robomme-val-{000000..%06d}.tar" "$SHARD_DIR" "$NVA")
 NW=$(( NTR + 1 < 8 ? NTR + 1 : 8 ))
+# wandb settings come from configs/experiment.yaml -> wandb, same as every other training here
+WB=$(PYTHONPATH="$OWM_ROOT" $OWM_PY -c "
+from owm.wandb_utils import wandb_config
+w = wandb_config()
+print(' '.join(['wandb.enable=%s' % str(bool(w['enable'])).lower(), 'wandb.project=%s' % w['project'],
+                'wandb.mode=%s' % w['mode']] + (['wandb.entity=%s' % w['entity']] if w['entity'] else [])))")
 cd "$CJEPA_ROOT"
 PYTHONPATH="$CJEPA_ROOT:$OWM_ROOT/owm/shims:$OWM_ROOT" $OWM_PY src/third_party/videosaur/videosaur/train.py \
   --log-dir "$LOG_DIR" --no-interactive \
   "$OWM_ROOT/configs/videosaur_robomme.yml" \
   globals.NUM_SLOTS=$N "dataset.train_shards=$TR" "dataset.val_shards=$VA" dataset.val_size=$VSZ \
-  dataset.num_workers=$NW trainer.devices=1 "$@"
+  dataset.num_workers=$NW trainer.devices=1 $WB "$@"

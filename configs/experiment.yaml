@@ -87,6 +87,13 @@ readout:
   aug_offsets: [4, 8, 12, 16]  # training-only pseudo-decisions at t + d inside the same subtask ([] = spec behaviour)
   seeds: [0, 1, 2]
 
+wandb:                         # used by ALL trainings: VideoSAUR, C-JEPA predictor, LPWM, readout heads
+  enable: true
+  project: owm_memory
+  entity: null                 # null = your default entity
+  mode: online                 # online | offline | disabled  (env WANDB_MODE wins; OWM_NO_WANDB=1 turns it off)
+  tags: [robomme]
+
 astra:
   model: gpt-6-astra
   reasoning_effort: high       # frozen after preregistration

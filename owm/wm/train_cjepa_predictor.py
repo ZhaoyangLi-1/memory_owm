@@ -21,6 +21,8 @@ import numpy as np
 import torch
 
 from owm.config import cache_dir, load_cfg, output_dir
+from owm.wandb_utils import flat_config
+from owm.wandb_utils import init as wandb_init
 from owm.wm.actions import ACTION_DIM, sequence_actions
 from owm.wm.cjepa_predictor_ext import build_predictor, cjepa_loss
 
@@ -110,6 +112,11 @@ def main():
     out = run_dir(a.tag)
     out.mkdir(parents=True, exist_ok=True)
     (out / "args.json").write_text(json.dumps(dict(vars(a), num_slots=N, W=W, F=F, slot_meta=data.get("meta", {})), indent=2, default=str))
+    wb = wandb_init(f"cjepa_predictor_{a.tag}", "cjepa_predictor", group=f"cjepa/{a.tag}",
+                    tags=["actions"] if a.actions else [],
+                    config=dict(flat_config(dict(cjepa=dict(cfg.cjepa), temporal=dict(cfg.temporal))), **vars(a),
+                                num_slots=N, W=W, F=F, n_params=sum(p.numel() for p in model.parameters()),
+                                n_train_sequences=len(train.keys), n_val_sequences=len(val.keys)))
     log, best, step = [], float("inf"), 0
     for epoch in range(a.epochs):
         model.train()
@@ -135,12 +142,16 @@ def main():
         tr = np.mean(run, 0)
         log.append(dict(epoch=epoch, step=step, train_loss=tr[0], train_future=tr[1], train_masked=tr[2], val_future_mse=v))
         print(f"epoch {epoch} step {step} train {tr[0]:.5f} (future {tr[1]:.5f} masked {tr[2]:.5f}) val_future {v:.5f} {time.time() - t0:.0f}s")
+        wb.log(dict(epoch=epoch, train_loss=tr[0], train_future_mse=tr[1], train_masked_history_mse=tr[2],
+                    val_future_mse=v, best_val_future_mse=min(best, v), lr=a.lr, epoch_seconds=time.time() - t0), step=step)
         torch.save(model.state_dict(), out / f"epoch_{epoch}_predictor.ckpt")
         if v < best:
             best = v
             torch.save(model.state_dict(), out / "best_predictor.ckpt")
         (out / "log.json").write_text(json.dumps(log, indent=2))
     torch.save(model.state_dict(), out / "final_predictor.ckpt")
+    wb.summary(dict(best_val_future_mse=best, final_val_future_mse=v, epochs=a.epochs, run_dir=str(out)))
+    wb.finish()
 
 
 def build_predictor_with_actions(N, cfg, device, builder, loss):

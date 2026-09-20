@@ -15,7 +15,7 @@
 ```bash
 cd /common/home/zl1308/Projects/owm_memory
 source scripts/env.sh          # 固定解释器 = conda env memory_owm，并重置 PYTHONPATH
-$OWM_PY -m pytest -q tests     # 40 个单元测试（无需数据/GPU）
+python -m pytest -q tests     # 40 个单元测试（无需数据/GPU）
 ```
 
 `scripts/env.sh` 会**覆盖** `PYTHONPATH`：登录 shell 的 `PYTHONPATH` 里有 `condBFNPol_latest`，它的 `utils/` 会遮蔽 LPWM 的 `utils/`，导致 `No module named 'utils.util_func'`。
@@ -58,26 +58,30 @@ tests/
 
 ### P0 帧缓存（一次性，约 15–60 min，~135 GB）
 ```bash
-$OWM_PY scripts/p0_extract_cache.py --source train --tasks all --workers 16
+python scripts/p0_extract_cache.py --source train --tasks all --workers 16
 ```
 把每条 episode 的 `front_rgb` 全部帧 + 逐帧标签从 h5 导出到 `cache/episodes/{source}/{task}/episode_i/{frames.npy, meta.npz}`；之后任何阶段都不再读 h5（h5 在 NFS 上按 timestep 分组，读取很慢）。
 
 ### P1 标签与规则
 ```bash
-$OWM_PY scripts/p1_labels.py --timelines 5      # 时间线、选项是否固定、目标解析覆盖率、视频段动作是否有信息、决策索引
-$OWM_PY scripts/p1_key_events.py                # 关键事件检查：outputs/key_events/<task>/episode_i.jpg + summary.txt
+python scripts/p1_labels.py --timelines 5      # 时间线、选项是否固定、目标解析覆盖率、视频段动作是否有信息、决策索引
+python scripts/p1_key_events.py                # 关键事件检查：outputs/key_events/<task>/episode_i.jpg + summary.txt
 # 方案 A：用内置规划器为官方 val seed 生成离线测试集（6 任务 × 50，6 个进程约 1 h，~45 GB）
-$OWM_PY scripts/p1_generate_test_split.py --gpus 2 3 4 --workers-per-gpu 2
+python scripts/p1_generate_test_split.py --gpus 2 3 4 --workers-per-gpu 2
 #   可选：每任务再加 200 条新 seed（规格 5.2 样本量）： --extra 200 --seed-base 2000000
-$OWM_PY scripts/p0_extract_cache.py --source test --tasks eval --workers 12
+python scripts/p0_extract_cache.py --source test --tasks eval --workers 12
 ```
 关卡：规则覆盖全部 episode（每条 ≥1 个记忆关键决策 ✔）、目标解析 100% ✔、关键事件可见 ✔（见第 3 节）。
 方案 B（70/30）：`experiment.yaml` 里 `split_plan: B`，不需要生成。
 
 ### P2 真值（重放，600 条约 40–80 min）
 ```bash
-$OWM_PY scripts/p2_gt.py --gpus 2 3 4 --workers-per-gpu 3      # train + test；报告写到 outputs/reports/p2_gt.txt
-$OWM_PY scripts/p2_gt.py --report-only                          # 只重建决策索引 + 报告
+# 只需要这一条：重放 train + test，最后自动重建 decisions.parquet 并写 outputs/reports/p2_gt.txt
+python scripts/p2_gt.py --gpus 2 3 4 --workers-per-gpu 3
+# 中途挂了直接重跑同一条命令即可（已有 data/gt/*.npz 的 episode 会跳过）
+
+# 仅当真值不变、但索引规则变了时用（future_offsets / aug_offsets / decision_rules.py / split_seed / 可见性阈值），几十秒： optional
+python scripts/p2_gt.py --report-only
 ```
 用 `setup/seed` 重放 joint_action，逐帧读取模拟器里所有物体位姿 + 前视分割图（可见性），存 `data/gt/...npz`，并把标签点匹配到 `target_obj`。
 关卡：重放一致、匹配失败 < 2% ✔；同时给出 n_max → `cjepa.num_slots = n_max + 3`。
@@ -89,23 +93,23 @@ git add -A && git commit -m "preregistration"      # 提交 configs/preregistrat
 
 ### P4 参照读出头（下限 / 上限；每个头 3–6 min，可按任务并行，见第 6 节）
 ```bash
-CUDA_VISIBLE_DEVICES=1 $OWM_PY scripts/p4_train_readout.py --conditions floor ceiling            # 评测 test
-CUDA_VISIBLE_DEVICES=1 $OWM_PY scripts/p4_train_readout.py --conditions floor ceiling --eval-split val   # 不碰 test 的自检
+CUDA_VISIBLE_DEVICES=1 python scripts/p4_train_readout.py --conditions floor ceiling            # 评测 test
+CUDA_VISIBLE_DEVICES=1 python scripts/p4_train_readout.py --conditions floor ceiling --eval-split val   # 不碰 test 的自检
 ```
 关卡：上限 ≥ 95%、下限 ≈ 机会水平（结果见第 5 节）。
 
 ### P5 C-JEPA
 ```bash
 # 5a  webdataset shards（video.npy，stride-16 序列；2 个 offset ≈ 19 GB）
-$OWM_PY scripts/p5a_make_videosaur_shards.py --offsets 0 8
+python scripts/p5a_make_videosaur_shards.py --offsets 0 8
 # 5b  用仓库自带的 VideoSAUR 训练器训练（252 px，N 个 slot，官方 100k 步）
 CUDA_VISIBLE_DEVICES=2 bash scripts/p5b_train_videosaur.sh 20
 # 5c  冻结 VideoSAUR，提取世界模型训练/验证 episode 的 slot（默认 16 个 offset，约 2–3 h；--offsets 0 4 8 12 更快）
-CUDA_VISIBLE_DEVICES=2 $OWM_PY scripts/p5c_extract_slots.py
+CUDA_VISIBLE_DEVICES=2 python scripts/p5c_extract_slots.py
 # 5d  预测器（W=context_frames, F=len(future_offsets)，物体级掩码 N//4，无动作/本体感知）
-CUDA_VISIBLE_DEVICES=2 $OWM_PY -m owm.wm.train_cjepa_predictor --tag main
+CUDA_VISIBLE_DEVICES=2 python -m owm.wm.train_cjepa_predictor --tag main
 # 验收（规格 7.3）：验证损失平稳 + 分解/预测可视化
-CUDA_VISIBLE_DEVICES=2 $OWM_PY scripts/p56_acceptance.py cjepa --episodes 20
+CUDA_VISIBLE_DEVICES=2 python scripts/p56_acceptance.py cjepa --episodes 20
 ```
 
 ### P6 LPWM
@@ -113,51 +117,51 @@ CUDA_VISIBLE_DEVICES=2 $OWM_PY scripts/p56_acceptance.py cjepa --episodes 20
 # 先探测显存能放下多少帧（batch 1, fp32）
 CUDA_VISIBLE_DEVICES=4 bash scripts/p6_lpwm_memory_probe.sh configs/lpwm_robomme.json 11 19 27
 # 训练（调用仓库自带 train_ddlp；数据集通过进程内替换 get_video_dataset 接入，不改仓库）
-CUDA_VISIBLE_DEVICES=3 $OWM_PY -m owm.wm.lpwm_train                       # 单卡
+CUDA_VISIBLE_DEVICES=3 python -m owm.wm.lpwm_train                       # 单卡
 CUDA_VISIBLE_DEVICES=2,3,4 accelerate launch --num_processes 3 -m owm.wm.lpwm_train --accelerate   # 多卡（可加 --mixed_precision bf16，未验证数值稳定性）
-CUDA_VISIBLE_DEVICES=3 $OWM_PY scripts/p56_acceptance.py lpwm --episodes 20
+CUDA_VISIBLE_DEVICES=3 python scripts/p56_acceptance.py lpwm --episodes 20
 ```
 `timestep_horizon` 由 `experiment.yaml` 的 `context_frames + 未来步数 − 1` 自动得到，保证两个模型上下文长度一致（**见第 4 节：80 帧在本机显存下训练不了 LPWM，需要两个模型同时缩短**）。
 
 ### P7 预测提取 + 未来扰动测试
 ```bash
-CUDA_VISIBLE_DEVICES=2 $OWM_PY scripts/p7_extract_evidence.py --model cjepa
-CUDA_VISIBLE_DEVICES=3 $OWM_PY scripts/p7_extract_evidence.py --model lpwm        # 5 次采样，种子 0–4；--batched-samples 更快
+CUDA_VISIBLE_DEVICES=2 python scripts/p7_extract_evidence.py --model cjepa
+CUDA_VISIBLE_DEVICES=3 python scripts/p7_extract_evidence.py --model lpwm        # 5 次采样，种子 0–4；--batched-samples 更快
 ```
 每个决策（含训练集的伪决策，共约 1.1 万个）写 `cache/evidence/{cjepa|lpwm}/{source}/{task}/{episode}_{t}.npz`（规格 8.3 格式；C-JEPA 约 0.3 s/个，LPWM 5 次采样约 2–5 s/个），随后随机 100 个决策做未来扰动测试
 （t 之后的帧全部换成噪声，整条流水线重跑，输出必须逐元素相同；前 5 个还做**反向对照**：把第 t 帧也换成噪声，输出必须变化）。有任何失败脚本以非零码退出。
 
 ### P8 离线评测与主表
 ```bash
-CUDA_VISIBLE_DEVICES=1 $OWM_PY scripts/p4_train_readout.py --conditions cjepa lpwm check_cjepa check_lpwm
-$OWM_PY scripts/p8_tables.py            # outputs/tables/main_table.md|json + appendix.md（S、CI、预测检查、结论、是否需第 2 个 WM 种子）
+CUDA_VISIBLE_DEVICES=1 python scripts/p4_train_readout.py --conditions cjepa lpwm check_cjepa check_lpwm
+python scripts/p8_tables.py            # outputs/tables/main_table.md|json + appendix.md（S、CI、预测检查、结论、是否需第 2 个 WM 种子）
 ```
 
 ### P9 GPT-6 Astra 离线（设置 A）
 ```bash
 export OPENAI_API_KEY=...
-$OWM_PY -m owm.baselines.astra_offline --dry-run --limit 3     # 不调用 API，只生成请求 + 标注图
-$OWM_PY -m owm.baselines.astra_offline --limit 10              # 试跑：核对格式、坐标、单次费用
-$OWM_PY -m owm.baselines.astra_offline                         # 全量（可断点续跑，不会重复计费）
-$OWM_PY -m owm.baselines.astra_offline --frame-only            # 可选对照：只给决策帧
-$OWM_PY scripts/p8_tables.py                                   # 主表自动多出 Astra 行
+python -m owm.baselines.astra_offline --dry-run --limit 3     # 不调用 API，只生成请求 + 标注图
+python -m owm.baselines.astra_offline --limit 10              # 试跑：核对格式、坐标、单次费用
+python -m owm.baselines.astra_offline                         # 全量（可断点续跑，不会重复计费）
+python -m owm.baselines.astra_offline --frame-only            # 可选对照：只给决策帧
+python scripts/p8_tables.py                                   # 主表自动多出 Astra 行
 ```
 
 ### P10 闭环（可选）
 ```bash
-CUDA_VISIBLE_DEVICES=2 $OWM_PY -m owm.closed_loop.runner --condition floor     # 也可 cjepa / lpwm
-$OWM_PY -m owm.baselines.astra_closed_loop                                     # 设置 B
+CUDA_VISIBLE_DEVICES=2 python -m owm.closed_loop.runner --condition floor     # 也可 cjepa / lpwm
+python -m owm.baselines.astra_closed_loop                                     # 设置 B
 ```
 
 ### P11 动作实验（可选，规格第 14 节）
 ```bash
-$OWM_PY scripts/p7_extract_evidence.py --model action_history                  # 泄露检查用的"动作历史"证据
-CUDA_VISIBLE_DEVICES=2 $OWM_PY -m owm.wm.train_cjepa_predictor --actions --tag actions
-CUDA_VISIBLE_DEVICES=3 $OWM_PY -m owm.wm.lpwm_train --actions
-$OWM_PY scripts/p7_extract_evidence.py --model cjepa --actions                 # 扰动测试同时把 t 之后的动作换成噪声
-$OWM_PY scripts/p7_extract_evidence.py --model lpwm --actions
-$OWM_PY scripts/p4_train_readout.py --conditions action_history cjepa_act lpwm_act
-$OWM_PY scripts/p8_tables.py --actions
+python scripts/p7_extract_evidence.py --model action_history                  # 泄露检查用的"动作历史"证据
+CUDA_VISIBLE_DEVICES=2 python -m owm.wm.train_cjepa_predictor --actions --tag actions
+CUDA_VISIBLE_DEVICES=3 python -m owm.wm.lpwm_train --actions
+python scripts/p7_extract_evidence.py --model cjepa --actions                 # 扰动测试同时把 t 之后的动作换成噪声
+python scripts/p7_extract_evidence.py --model lpwm --actions
+python scripts/p4_train_readout.py --conditions action_history cjepa_act lpwm_act
+python scripts/p8_tables.py --actions
 ```
 
 ---
@@ -317,9 +321,31 @@ VideoRepick 困难档（15 个方块、间距约 4 cm）读出头学不会，而
 
 ---
 
-## 6. 小贴士
-- 读出头可按任务并行：`CUDA_VISIBLE_DEVICES=k $OWM_PY scripts/p4_train_readout.py --conditions ... --tasks <Task>`（预测按任务/条件分文件保存，互不冲突）。6 任务 × 2 条件 × 3 种子在 5 张卡上约 40 min。
+## 6. wandb
+
+四个训练全部接入 wandb，配置集中在 `configs/experiment.yaml → wandb`（`project: owm_memory`，`mode: online`）：
+
+| job_type | group | 记录内容 |
+|---|---|---|
+| `videosaur` | `videosaur_robomme` | 官方 Lightning logger（loss_featrec / loss_timesim / 验证损失），TensorBoard 和 CSV 仍然照常写 |
+| `cjepa_predictor` | `cjepa/<tag>` | `train_loss`、`train_future_mse`、`train_masked_history_mse`、`val_future_mse`、每 epoch 耗时 |
+| `lpwm` | `lpwm` | 仓库自己那套每 epoch 指标（各项 KL、`on_l1`、PSNR、LPIPS）+ `val/loss` |
+| `readout` | `<任务>/<条件>` | 每 100 步的 train/val loss，结束时把 `test/acc_main` 等写进 summary，3 个种子同组便于对比 |
+
+实现方式：`owm/wandb_utils.py` 统一初始化；LPWM 那边通过包住仓库自己的 `format_epoch_summary` / `log_line` 取数（**没有改 LPWM 仓库**）；VideoSAUR 由 `scripts/p5b_train_videosaur.sh` 把 `experiment.yaml` 里的 wandb 设置透传成命令行覆盖。wandb 挂了或没装都只打印一行提示，不会中断训练。
+
+```bash
+wandb login                      # 首次需要（~/.netrc 里已有凭据则跳过）
+OWM_NO_WANDB=1 <任何命令>          # 临时关闭
+WANDB_MODE=offline <任何命令>      # 断网时先存本地，之后 wandb sync
+```
+多卡 LPWM 只有 rank 0 建 run；`--probe`（显存探测）不建 run。
+
+---
+
+## 7. 小贴士
+- 读出头可按任务并行：`CUDA_VISIBLE_DEVICES=k python scripts/p4_train_readout.py --conditions ... --tasks <Task>`（预测按任务/条件分文件保存，互不冲突）。6 任务 × 2 条件 × 3 种子在 5 张卡上约 40 min。
 - 想完全回到规格原始设置做对照：`readout.fourier_freqs: 16`、`readout.resample_ids: false`、`readout.aug_offsets: []`、`temporal.future_offsets: [16, 32]`、`stats.exclude: {}`。
-- 改了 `future_offsets` / `aug_offsets` / 决策规则后要重建索引：`$OWM_PY scripts/p2_gt.py --report-only`；改了 `future_offsets` 或 `context_frames` 后世界模型要重训、证据要重提。
+- 改了 `future_offsets` / `aug_offsets` / 决策规则后要重建索引：`python scripts/p2_gt.py --report-only`；改了 `future_offsets` 或 `context_frames` 后世界模型要重训、证据要重提。
 - 不要在命令里用 `pkill -f <脚本名>` 之类的模式去杀后台任务——它也会匹配到正在启动的新命令自己。
 - 大文件一律放 `~/data/owm_memory_data`（`/common/home` 配额 208 GB）。`cache/episodes` 约 160 GB，`data/generated` 约 44 GB。

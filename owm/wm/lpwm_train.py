@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 
 from owm.config import ROOT, cache_dir, load_cfg, output_dir, resolve
+from owm.wandb_utils import Run
+from owm.wandb_utils import init as wandb_init
 
 
 def lpwm_sys_path() -> Path:
@@ -31,6 +33,35 @@ def lpwm_sys_path() -> Path:
         if mod is not None and not str(getattr(mod, "__file__", "") or getattr(mod, "__path__", [""])[0]).startswith(str(repo)):
             del sys.modules[name]
     return repo
+
+
+def patch_wandb_logging(trainer, wb):
+    """Log the repo's own per-epoch numbers to wandb without editing the LPWM repo.
+
+    `train_ddlp` builds its epoch summary via `format_epoch_summary(epoch=..., loss=..., ...)` — every metric
+    arrives as a keyword argument, so wrapping that function gives clean numbers (no log parsing). The validation
+    loss is computed after the summary, so it is picked up from the `validation loss: X` line that goes to
+    `log_line`. Both names are module-level imports in the trainer, so patching the trainer module is enough."""
+    import re
+
+    state = {"epoch": 0}
+    original_summary, original_log_line = trainer.format_epoch_summary, trainer.log_line
+
+    def format_epoch_summary(**kw):
+        state["epoch"] = int(kw.get("epoch", state["epoch"]))
+        metrics = {f"train/{k}": v for k, v in kw.items() if k != "epoch" and isinstance(v, (int, float))}
+        if "obj_on" in kw:
+            metrics["train/on_l1"] = kw["obj_on"]      # mean number of visible particles (spec 7.3 acceptance)
+        wb.log(dict(metrics, epoch=state["epoch"]), step=state["epoch"])
+        return original_summary(**kw)
+
+    def log_line(log_dir, line, *args, **kwargs):
+        m = re.search(r"validation loss: ([\d.eE+-]+)", str(line))
+        if m:
+            wb.log({"val/loss": float(m.group(1)), "epoch": state["epoch"]}, step=state["epoch"])
+        return original_log_line(log_dir, line, *args, **kwargs)
+
+    trainer.format_epoch_summary, trainer.log_line = format_epoch_summary, log_line
 
 
 def patch_dataset_factory(with_actions: bool):
@@ -108,6 +139,12 @@ def main():
     import atexit
     import torch
     atexit.register(lambda: print(f"[owm] peak CUDA memory: {torch.cuda.max_memory_allocated() / 2 ** 30:.1f} GiB"))
+    # only rank 0 gets a wandb run, otherwise every DDP process would create its own
+    is_main = int(os.environ.get("LOCAL_RANK", "0")) == 0 and not a.probe
+    wb = wandb_init(f"lpwm{'_act' if a.actions else ''}", "lpwm", group="lpwm",
+                    tags=["actions"] if a.actions else [], config=conf) if is_main else Run()
+    patch_wandb_logging(trainer, wb)
+    atexit.register(wb.finish)
     print(f"[owm] LPWM run dir: {run_root}  T={conf['timestep_horizon']}  image={conf['image_size']}  actions={a.actions}")
     trainer.train_ddlp(str(conf_path))
 

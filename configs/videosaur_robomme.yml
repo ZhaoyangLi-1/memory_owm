@@ -19,13 +19,14 @@ globals:
   SIM_WEIGHT: 0.25
   SIM_TEMP: 0.25
 
-wandb:
-  enable: false
-  project: videosaur
+wandb:            # project / entity / mode / enable are overridden by scripts/p5b_train_videosaur.sh
+                  # from configs/experiment.yaml -> wandb, so all trainings share one setting
+  enable: true
+  project: owm_memory
   name: ${experiment_name}
   group: ${experiment_group}
-  tags: [robomme, dinov2]
-  mode: offline
+  tags: [robomme, dinov2, videosaur]
+  mode: online
 
 
 trainer:
