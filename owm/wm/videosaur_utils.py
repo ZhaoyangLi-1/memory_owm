@@ -36,8 +36,29 @@ def find_checkpoint(path: str | Path | None = None) -> Path:
         return p
     cks = sorted(p.rglob("*.ckpt"), key=lambda f: f.stat().st_mtime)
     if not cks:
-        raise FileNotFoundError(f"no VideoSAUR checkpoint under {p}")
+        raise SystemExit(f"{p} 下没有 VideoSAUR checkpoint。先跑 5b：\n"
+                         f"  CUDA_VISIBLE_DEVICES=2,3,4 bash scripts/p5b_train_videosaur.sh")
     return cks[-1]
+
+
+def align_slots(slots: np.ndarray) -> np.ndarray:
+    """Re-order the slots of every frame so that index i is the same object over time, [T, N, D] -> [T, N, D].
+
+    The trained model permutes its slot indices at every step (measured on the val slots: slot i of frame t is the
+    nearest neighbour of slot i of frame t+1 in 7% of the cases, of frame t+2 in 87%; after re-matching the
+    same-slot cosine is 0.99), and the C-JEPA predictor masks / identifies objects BY INDEX. Frame t is matched to
+    the already aligned frame t-1 (Hungarian on cosine similarity), so it still depends on frames <= t only, and
+    frame 0 keeps its order. Only the order changes, never a value."""
+    from scipy.optimize import linear_sum_assignment
+    out = np.array(slots, copy=True)
+    prev = out[0].astype(np.float32)
+    prev /= np.maximum(np.linalg.norm(prev, axis=-1, keepdims=True), 1e-8)
+    for t in range(1, len(out)):
+        cur = out[t].astype(np.float32)
+        cur /= np.maximum(np.linalg.norm(cur, axis=-1, keepdims=True), 1e-8)
+        _, col = linear_sum_assignment(-(prev @ cur.T))
+        out[t], prev = out[t][col], cur[col]
+    return out
 
 
 class VideoSaur:
@@ -66,7 +87,8 @@ class VideoSaur:
 
     @torch.no_grad()
     def encode(self, frames: np.ndarray, seed: int = 0, chunk: int = 64) -> np.ndarray:
-        """Slots of a frame sequence, [T, N, D]. Frame t's slots depend on frames <= t only."""
+        """Slots of a frame sequence, [T, N, D], index-aligned over time (`align_slots`). Frame t's slots depend on
+        frames <= t only."""
         video = self.preprocess(frames)
         feats = []
         for i in range(0, len(video), chunk):  # the frame encoder is per-frame, chunking changes nothing
@@ -81,7 +103,7 @@ class VideoSaur:
         if cuda_state is not None:
             torch.cuda.set_rng_state_all(cuda_state)
         out = self.model.processor(slots0, feats)
-        return out["state"][0].float().cpu().numpy()
+        return align_slots(out["state"][0].float().cpu().numpy())
 
     @torch.no_grad()
     def decode_masks(self, slots: np.ndarray | torch.Tensor) -> np.ndarray:

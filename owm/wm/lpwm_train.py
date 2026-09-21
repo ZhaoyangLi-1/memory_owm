@@ -24,18 +24,34 @@ from owm.wandb_utils import init as wandb_init
 
 
 def lpwm_sys_path() -> Path:
-    """Import LPWM's top-level modules (models, modules, utils, datasets, eval). A foreign package called `utils` or
-    `datasets` earlier on sys.path would shadow them, so the repo goes first and stale modules are dropped."""
+    """Make LPWM's top-level packages (utils, datasets, eval, modules) and modules (models) importable.
+
+    None of LPWM's package directories has an `__init__.py`, so they are namespace packages. Per PEP 420 a namespace
+    package is only used when NO regular package of that name is found anywhere on sys.path — so a foreign
+    `utils/__init__.py` (the login shell's PYTHONPATH has one, from condBFNPol_latest) wins even when the LPWM repo
+    is sys.path[0]. Prepending the repo therefore does not help; instead bind each name directly to the repo's
+    directory in sys.modules, which no later finder can override.
+    """
+    import importlib.machinery
+    import importlib.util
+
     repo = resolve(load_cfg().paths.lpwm_repo)
     sys.path[:] = [str(repo)] + [p for p in sys.path if p != str(repo)]
     for name in ("utils", "datasets", "eval", "modules", "models"):
         mod = sys.modules.get(name)
-        if mod is not None and not str(getattr(mod, "__file__", "") or getattr(mod, "__path__", [""])[0]).startswith(str(repo)):
-            del sys.modules[name]
+        path = str(getattr(mod, "__file__", "") or (getattr(mod, "__path__", None) or [""])[0]) if mod else ""
+        if mod is not None and not path.startswith(str(repo)):
+            del sys.modules[name]                       # drop whatever was imported before us
+            mod = None
+        directory = repo / name
+        if mod is None and directory.is_dir():          # bind the namespace package to LPWM's directory
+            spec = importlib.machinery.ModuleSpec(name, None, is_package=True)
+            spec.submodule_search_locations = [str(directory)]
+            sys.modules[name] = importlib.util.module_from_spec(spec)
     return repo
 
 
-def patch_wandb_logging(trainer, wb):
+def patch_wandb_logging(trainer, wb, step_every: int = 25):
     """Log the repo's own per-epoch numbers to wandb without editing the LPWM repo.
 
     `train_ddlp` builds its epoch summary via `format_epoch_summary(epoch=..., loss=..., ...)` — every metric
@@ -44,21 +60,48 @@ def patch_wandb_logging(trainer, wb):
     `log_line`. Both names are module-level imports in the trainer, so patching the trainer module is enough."""
     import re
 
-    state = {"epoch": 0}
-    original_summary, original_log_line = trainer.format_epoch_summary, trainer.log_line
+    state = {"epoch": 0, "step": 0, "on_l1": []}
+    original_summary, original_log_line, original_tqdm = trainer.format_epoch_summary, trainer.log_line, trainer.tqdm
 
+    def tqdm_(*args, **kwargs):
+        """Per-step logging. An epoch is thousands of iterations and takes hours, so epoch-level logging alone would
+        leave wandb empty for a long time. The trainer already reports everything interesting through
+        `pbar.set_postfix(loss=..., rec=..., kl=..., on_l1=..., ...)`, so that call is mirrored to wandb."""
+        bar = original_tqdm(*args, **kwargs)
+        set_postfix = bar.set_postfix
+
+        def set_postfix_(ordered_dict=None, refresh=True, **kw):
+            state["step"] += 1
+            if isinstance(kw.get("on_l1"), (int, float)):
+                state["on_l1"].append(kw["on_l1"])     # epoch mean of the spec 7.3 acceptance metric
+            if state["step"] % step_every == 0:
+                wb.log({f"step/{k}": v for k, v in kw.items() if isinstance(v, (int, float))} | {"epoch": state["epoch"]},
+                       step=state["step"])
+            return set_postfix(ordered_dict, refresh, **kw)
+
+        bar.set_postfix = set_postfix_
+        return bar
+
+    trainer.tqdm = tqdm_
+
+    # everything shares ONE x-axis (the global iteration counter); wandb requires a monotone step, so epoch-level
+    # metrics are logged at the current step and `epoch` travels along as an ordinary metric
     def format_epoch_summary(**kw):
         state["epoch"] = int(kw.get("epoch", state["epoch"]))
         metrics = {f"train/{k}": v for k, v in kw.items() if k != "epoch" and isinstance(v, (int, float))}
-        if "obj_on" in kw:
-            metrics["train/on_l1"] = kw["obj_on"]      # mean number of visible particles (spec 7.3 acceptance)
-        wb.log(dict(metrics, epoch=state["epoch"]), step=state["epoch"])
+        if state["on_l1"]:   # the repo's `obj_on` kwarg is a TENSOR [batch_size, n_kp], not the L1 count, and
+            # wandb_utils drops non-scalars; the per-step postfix carries the real number, so average that.
+            metrics["train/on_l1"] = sum(state["on_l1"]) / len(state["on_l1"])
+            state["on_l1"].clear()
+        # commit=False leaves wandb's step pointer on this step, so the validation loss logged a few seconds
+        # later (same step, after the figures) is not rejected as "less than the current step" and dropped.
+        wb.log(dict(metrics, epoch=state["epoch"]), step=state["step"], commit=False)
         return original_summary(**kw)
 
     def log_line(log_dir, line, *args, **kwargs):
         m = re.search(r"validation loss: ([\d.eE+-]+)", str(line))
         if m:
-            wb.log({"val/loss": float(m.group(1)), "epoch": state["epoch"]}, step=state["epoch"])
+            wb.log({"val/loss": float(m.group(1)), "epoch": state["epoch"]}, step=state["step"])
         return original_log_line(log_dir, line, *args, **kwargs)
 
     trainer.format_epoch_summary, trainer.log_line = format_epoch_summary, log_line
@@ -123,7 +166,21 @@ def main():
     os.chdir(run_root)
 
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    world = int(os.environ.get("WORLD_SIZE", 1))
+    n_visible = len(visible.split(",")) if visible else 0
+    if world > 1 and not a.accelerate:
+        # `accelerate launch` without --accelerate would start `world` INDEPENDENT single-GPU trainings that never
+        # talk to each other (and overwrite each other's outputs), which looks like it is working.
+        raise SystemExit(f"launched with {world} processes but --accelerate was not passed. Either add --accelerate, "
+                         f"or run a single process without `accelerate launch`.")
     if a.accelerate:
+        # --num_processes must match the number of GPUs in CUDA_VISIBLE_DEVICES; with more processes than GPUs
+        # several ranks end up sharing one GPU (no crash, but wrong utilisation and OOM risk).
+        if n_visible and world > n_visible:
+            raise SystemExit(f"--num_processes={world} but CUDA_VISIBLE_DEVICES={visible} only has {n_visible} GPU(s). "
+                             f"Use: CUDA_VISIBLE_DEVICES={visible} accelerate launch --num_processes {n_visible} ...")
+        if n_visible and world < n_visible and int(os.environ.get("LOCAL_RANK", "0")) == 0:
+            print(f"[owm] warning: {n_visible} GPUs visible but only {world} process(es) — {n_visible - world} GPU(s) idle")
         import train_lpwm_accelerate as trainer   # this module overwrites CUDA_VISIBLE_DEVICES at import time
         if visible is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = visible

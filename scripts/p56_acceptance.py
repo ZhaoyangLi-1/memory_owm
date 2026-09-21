@@ -22,6 +22,7 @@ PALETTE = np.array([[230, 25, 75], [60, 180, 75], [255, 225, 25], [0, 130, 200],
                     [240, 50, 230], [210, 245, 60], [250, 190, 212], [0, 128, 128], [220, 190, 255], [170, 110, 40],
                     [255, 250, 200], [128, 0, 0], [170, 255, 195], [128, 128, 0], [255, 215, 180], [0, 0, 128], [128, 128, 128],
                     [255, 255, 255], [0, 0, 0]] * 4, np.uint8)
+FUTURE = " / ".join(f"t+{o}" for o in load_cfg().temporal.future_offsets)   # the panel captions follow the config (K = 4)
 
 
 def plateau(values: list[float], name: str) -> str:
@@ -30,8 +31,15 @@ def plateau(values: list[float], name: str) -> str:
     if len(v) < 10:
         return f"{name}: only {len(v)} validation points — keep training"
     k = max(int(round(0.1 * len(v))), 2)
-    rel = abs(v[-k:].mean() - v[-2 * k:-k].mean()) / max(abs(v[-2 * k:-k].mean()), 1e-12)
-    return f"{name}: last-10% relative change = {100 * rel:.2f}%  ->  {'PLATEAU (pass)' if rel < 0.02 else 'still changing (keep training)'}"
+    rel = (v[-k:].mean() - v[-2 * k:-k].mean()) / max(abs(v[-2 * k:-k].mean()), 1e-12)   # signed: < 0 = still falling
+    if abs(rel) < 0.02:
+        verdict = "PLATEAU (pass)"
+    elif rel < 0:
+        verdict = "still falling (keep training)"
+    else:   # a rising validation loss is over-fitting: more training makes it worse, the fix is the best checkpoint
+        verdict = (f"RISING = over-fitting, do NOT train longer; minimum {v.min():.5f} at validation point "
+                   f"{int(v.argmin())} of {len(v)}, last {v[-1]:.5f}")
+    return f"{name}: last-10% relative change = {100 * rel:+.2f}%  ->  {verdict}"
 
 
 def overlay(frame: np.ndarray, masks: np.ndarray) -> np.ndarray:
@@ -55,7 +63,11 @@ def run_cjepa(a):
     log = ad.ckpt.parent / "log.json"
     lines = []
     if log.exists():
-        lines.append(plateau([e["val_future_mse"] for e in json.loads(log.read_text())], "C-JEPA predictor val future-MSE"))
+        entries = json.loads(log.read_text())
+        lines.append(plateau([e["val_future_mse"] for e in entries], "C-JEPA predictor val future-MSE"))
+        b = min(entries, key=lambda e: e["val_future_mse"])
+        lines.append(f"evaluated predictor checkpoint: {ad.ckpt.name}  (best_predictor.ckpt = epoch {b['epoch']}, "
+                     f"val future-MSE {b['val_future_mse']:.5f})")
     metrics = sorted(ad.vs.ckpt.parent.parent.glob("metrics/*/metrics.csv"))
     if metrics:
         import pandas as pd
@@ -75,8 +87,8 @@ def run_cjepa(a):
         row2 += [np.zeros((256, 256, 3), np.uint8)] * (len(row1) - len(row2))
         Image.fromarray(np.concatenate([np.concatenate(row1, 1), np.concatenate(row2, 1)], 0)).save(
             out / f"{r['task']}_ep{r['episode']}_t{r['t']}.jpg", quality=85)
-    lines.append(f"panels: {out}  (top: slot masks of the last history frames; bottom: masks decoded from the PREDICTED slots, "
-                 f"drawn over the real t+16 / t+32 frames)")
+    lines.append(f"panels: {out}  (top: slot masks of the last history frames, same colour = same slot index; bottom: masks "
+                 f"decoded from the PREDICTED slots, drawn over the real {FUTURE} frames, black = padding)")
     (out / "report.txt").write_text("\n".join(lines))
     print("\n".join(lines))
 
@@ -118,7 +130,7 @@ def run_lpwm(a):
     M = int(ad.hp["n_kp_prior"])
     lines.append(f"LPWM on_l1 (mean number of visible particles per frame) = {np.mean(on_l1):.1f} of M = {M}  ->  "
                  f"{'OK' if 0.05 * M < np.mean(on_l1) < 0.95 * M else 'near 0 or near M: ADJUST M (spec 7.2)'}")
-    lines.append(f"panels: {out}  (decision frame with visible particles | rendered prediction t+16, t+32 | real t+16, t+32)")
+    lines.append(f"panels: {out}  (decision frame with visible particles | rendered prediction {FUTURE} | real {FUTURE})")
     (out / "report.txt").write_text("\n".join(lines))
     print("\n".join(lines))
 

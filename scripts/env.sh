@@ -8,6 +8,8 @@ export LPWM_ROOT=/common/home/zl1308/Projects/lpwm
 export PYTHONPATH="$OWM_ROOT"
 export PATH="$(dirname "$OWM_PY"):$PATH"
 export HF_HUB_DISABLE_TELEMETRY=1
+# LPWM 在 24 帧上下文下峰值约 41 GiB / 44 GiB 可用，余量很小；减少显存碎片以免长训练中途 OOM
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # bulk storage for cache / data / outputs (configs/experiment.yaml -> paths.storage_root); the home volume has a quota
 export OWM_STORAGE="$($OWM_PY -c "import yaml;print(yaml.safe_load(open('$OWM_ROOT/configs/experiment.yaml'))['paths']['storage_root'])")"
 export OWM_CACHE="$OWM_STORAGE/cache" OWM_OUT="$OWM_STORAGE/outputs"

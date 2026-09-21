@@ -35,8 +35,8 @@ configs/experiment.yaml         全部固定变量（规格 16.2）+ 路径
 configs/preregistration.yaml    预注册（P3：看任何测试结果前 git commit）
 configs/decision_rules.yaml     决策规则文字版（实现：owm/data/decision_rules.py）
 configs/option_vocab.yaml       各任务选项（P1 自动生成）
-configs/videosaur_robomme.yml   VideoSAUR 配置（由官方 pusht_dinov2_hf.yml 派生）
-configs/lpwm_robomme.json       LPWM 256px 配置（由官方 bridge.json 派生）；lpwm_robomme_128.json = 官方 128px
+configs/videosaur_robomme.yml   VideoSAUR 配置（由官方 pusht_dinov2_hf.yml 派生；252px / 20 slot / SIM_TEMP 0.02）
+configs/lpwm_robomme.json       LPWM 256px 配置（由官方 panda.json 派生，Franka Panda 桌面场景）
 owm/data/      h5_reader sampling splits goal_parser decision_rules decision_index gt_state key_events
 owm/wm/        videosaur_utils cjepa_predictor_ext train_cjepa_predictor cjepa_adapter cjepa_action
                lpwm_dataset lpwm_train lpwm_adapter actions evidence future_perturb
@@ -91,7 +91,7 @@ python scripts/p2_gt.py --report-only
 git add -A && git commit -m "preregistration"      # 提交 configs/preregistration.yaml（填上 registered_on）
 ```
 
-### P4 参照读出头（下限 / 上限；每个头 3–6 min，可按任务并行，见第 6 节）
+### P4 参照读出头（下限 / 上限；每个头 3–6 min，可按任务并行，见第 7 节）
 ```bash
 CUDA_VISIBLE_DEVICES=1 python scripts/p4_train_readout.py --conditions floor ceiling            # 评测 test
 CUDA_VISIBLE_DEVICES=1 python scripts/p4_train_readout.py --conditions floor ceiling --eval-split val   # 不碰 test 的自检
@@ -99,29 +99,71 @@ CUDA_VISIBLE_DEVICES=1 python scripts/p4_train_readout.py --conditions floor cei
 关卡：上限 ≥ 95%、下限 ≈ 机会水平（结果见第 5 节）。
 
 ### P5 C-JEPA
+
+四步严格串行（5a → 5b → 5c → 5d），P6 可以在别的卡上同时跑。
+
 ```bash
-# 5a  webdataset shards（video.npy，stride-16 序列；2 个 offset ≈ 19 GB）
+# 5a  webdataset shards（video.npy，stride-16 序列；2 个 offset ≈ 3000 个样本 / 19 GB）
 python scripts/p5a_make_videosaur_shards.py --offsets 0 8
-# 5b  用仓库自带的 VideoSAUR 训练器训练（252 px，N 个 slot，官方 100k 步）
-CUDA_VISIBLE_DEVICES=2 bash scripts/p5b_train_videosaur.sh 20
-# 5c  冻结 VideoSAUR，提取世界模型训练/验证 episode 的 slot（默认 16 个 offset，约 2–3 h；--offsets 0 4 8 12 更快）
+
+# 5b  用仓库自带的 VideoSAUR 训练器（252 px，官方 100k 步）—— 整条流程最耗时的一步
+CUDA_VISIBLE_DEVICES=2     bash scripts/p5b_train_videosaur.sh        # 单卡；N 省略时取 cjepa.num_slots (=20)
+CUDA_VISIBLE_DEVICES=2,3,4 bash scripts/p5b_train_videosaur.sh        # 多卡 DDP，卡数由 CUDA_VISIBLE_DEVICES 决定
+#   中断续训：在命令后加  --continue <LOG_DIR 下那个带时间戳的目录>
+
+# 5c  冻结 VideoSAUR，提取世界模型训练/验证 episode 的 slot（默认 16 个 offset，约 2–3 h；--offsets 0 4 8 12 快 4 倍）
 CUDA_VISIBLE_DEVICES=2 python scripts/p5c_extract_slots.py
-# 5d  预测器（W=context_frames, F=len(future_offsets)，物体级掩码 N//4，无动作/本体感知）
-CUDA_VISIBLE_DEVICES=2 python -m owm.wm.train_cjepa_predictor --tag main
+
+# 5d  预测器（W=context_frames，F=len(future_offsets)，物体级掩码 N//4，无动作/本体感知）
+#     一个 epoch = 过完整个 clip 集合（每条序列 x 每个历史长度 T_h 各一次）：batch 32 下约 16,123 步；
+#     想回到旧的固定步数就加 --steps-per-epoch 2000
+CUDA_VISIBLE_DEVICES=2 python -m owm.wm.train_cjepa_predictor --tag main                      # 单卡
+CUDA_VISIBLE_DEVICES=2,3,4 torchrun --nproc_per_node=3 \
+    -m owm.wm.train_cjepa_predictor --tag main --batch-size 16                                # 3 卡 DDP，总 batch 仍 48
+CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 \
+    -m owm.wm.train_cjepa_predictor --tag main --batch-size 24                                # 2 卡 DDP，总 batch 仍 48
+
 # 验收（规格 7.3）：验证损失平稳 + 分解/预测可视化
 CUDA_VISIBLE_DEVICES=2 python scripts/p56_acceptance.py cjepa --episodes 20
 ```
 
+**多卡注意（5b）**：`p5b` 默认把每卡 batch 除以卡数，让**总 batch 和学习率与单卡一致** —— 多卡纯粹是提速，不改训练配方。
+若不除（`KEEP_TOTAL_BATCH=0`），每卡仍是 64、总 batch = 64 × 卡数，而单步耗时不变，**100k 步的墙钟时间和单卡完全一样**，只是每步吃更多数据、学习率被官方规则自动放大（3 卡 → 6e-4）。
+
+| 卡数 | 每卡 batch | 总 batch | 学习率 |
+|---|---|---|---|
+| 1 | 64 | 64 | 2.0e-4 |
+| 2 | 32 | 64 | 2.0e-4 |
+| 3 | 22 | 66 | 2.06e-4 |
+| 4 | 16 | 64 | 2.0e-4 |
+
+脚本还会自动限制 `num_workers`（webdataset 要求 ≤ 每卡 shard 数），并在验证 shard 不够分卡时提前报错。当前 shard 是 `--per-shard 32` 造的，验证集只有 3 个 shard → **最多 3 卡**；要更多卡就用 `--per-shard 16` 重造。
+
+**多卡注意（5d）**：DDP 下每卡各取 `--batch-size` 个片段，有效 batch = 该值 × 卡数，所以想保持配方就把它除以卡数。
+实现上各卡共用同一个「历史长度」随机数生成器（形状必须一致，否则梯度 all-reduce 会死锁），而样本选择各卡独立；checkpoint 一律存解包后的 `state_dict`，单卡/多卡产物完全通用。
+
 ### P6 LPWM
+
 ```bash
-# 先探测显存能放下多少帧（batch 1, fp32）
-CUDA_VISIBLE_DEVICES=4 bash scripts/p6_lpwm_memory_probe.sh configs/lpwm_robomme.json 11 19 27
+# 先探测显存能放下多少帧（batch 1, fp32）；参数是 timestep_horizon = 上下文帧数 + 未来步数 − 1
+CUDA_VISIBLE_DEVICES=4 bash scripts/p6_lpwm_memory_probe.sh configs/lpwm_robomme.json 35 39   # 已测(panda配置)：35 通过 32.1 GiB
+
 # 训练（调用仓库自带 train_ddlp；数据集通过进程内替换 get_video_dataset 接入，不改仓库）
-CUDA_VISIBLE_DEVICES=3 python -m owm.wm.lpwm_train                       # 单卡
-CUDA_VISIBLE_DEVICES=2,3,4 accelerate launch --num_processes 3 -m owm.wm.lpwm_train --accelerate   # 多卡（可加 --mixed_precision bf16，未验证数值稳定性）
+CUDA_VISIBLE_DEVICES=3 python -m owm.wm.lpwm_train                                                 # 单卡
+CUDA_VISIBLE_DEVICES=2,3,4 accelerate launch --num_processes 3 -m owm.wm.lpwm_train --accelerate   # 3 卡
+CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes 2 -m owm.wm.lpwm_train --accelerate # 2卡
+#   可加 --mixed_precision bf16（未验证数值稳定性）
+
 CUDA_VISIBLE_DEVICES=3 python scripts/p56_acceptance.py lpwm --episodes 20
 ```
-`timestep_horizon` 由 `experiment.yaml` 的 `context_frames + 未来步数 − 1` 自动得到，保证两个模型上下文长度一致（**见第 4 节：80 帧在本机显存下训练不了 LPWM，需要两个模型同时缩短**）。
+
+`timestep_horizon` 由 `experiment.yaml` 的 `context_frames + 未来步数 − 1` 自动得到，保证两个模型上下文长度一致（**见第 4 节 D.3：80 帧在本机显存下训练不了 LPWM，需要两个模型同时缩短**）。
+
+**多卡注意**：LPWM 在 256 px 下 `batch_size` 只能是 1，没法再除，所以多卡就是把有效 batch 变成卡数 —— 3 卡刚好回到官方 bridge 配置的 `batch_size: 3`，属于往官方设置靠拢。仓库自带的 accelerate 版本写得很规范（`unwrap_model` 存档、`is_main_process` 守卫），checkpoint 与单卡通用。
+启动器会在 import 之后恢复你指定的 `CUDA_VISIBLE_DEVICES`（`train_lpwm_accelerate.py` 在 import 时会强行改成 `"0,1,2,3"`），wandb 只有 rank 0 建 run。
+已知小瑕疵：非主进程也会各自建一个带时间戳的日志目录，checkpoint 只由 rank 0 写，不影响正确性。
+
+**读出头（P4/P8）不要用 DDP**：模型只有 200 万参数、单步不到 10 ms，通信开销大于计算。按任务铺开才是对的（见第 7 节）。
 
 ### P7 预测提取 + 未来扰动测试
 ```bash
@@ -179,7 +221,7 @@ python scripts/p8_tables.py --actions
 | 7 | 前视相机能否输出分割 | **能**（`obs_mode="rgb+depth+segmentation"`，`include_maniskill_obs=True`）→ 可见性 = 分割像素数 ≥ 20，不需要深度后备方案。内外参是 OpenCV 约定；标签 point 与 `project(actor.pose.p)` 的误差 ≈ 0.5 px；匹配失败率 0–1.3%。 |
 | 8 | VideoSAUR slot 是否严格因果 | **是**（读代码确认）：逐帧 DINOv2（MapOverTime）+ ScanOverTime，`slots_t = SA(Pred(slots_{t-1}), feat_t)`，无时间注意力/BatchNorm。适配层仍对每个决策**只编码截断到 t 的帧**，并由扰动测试端到端验证。注意 slot 初始化在 eval 下也采样噪声 → 每条序列固定 torch 种子。 |
 | 9 | VideoSAUR 解码器能否单独解码预测 slot | **能**：`model.decoder.module(slots[B,S,D]) → masks[B,S,P]`，252 输入 → 18×18，取掩码加权质心。已跑通。 |
-| 10 | C-JEPA 预测器能否 W=80 + 填充掩码 | 位置编码是长度 = W+F 的可学习表，**82×N token 可行**。但**没有 padding mask**，且官方 from-slot 训练器会丢弃所有短于 W+F 的视频——stride 16 下**每条 RoboMME episode 都短于 82 帧**（最长 ~70），官方训练器会得到 0 个样本。官方 `inference()` 本身支持更短历史（把历史**右对齐**到时间表末尾）。因此训练改成与官方推理一致：变长历史、右对齐、批内同长度、无填充 token（`owm/wm/cjepa_predictor_ext.py`，子类，参数/ state_dict 与官方完全相同）。另两点：官方 `get_mask_indices` 每次用固定种子重建 RNG → 被掩码的 slot 下标永远不变（默认保持官方行为，`mask_sampling: random` 可改）；`dim_head` 参数在官方代码里未被使用（实际 head dim = 128/16 = 8）。 |
+| 10 | C-JEPA 预测器能否 W=80 + 填充掩码 | 位置编码是长度 = W+F 的可学习表，**82×N token 可行**。但**没有 padding mask**，且官方 from-slot 训练器（`ClevrerSlotDataset`）是**定长 W+F 的滑动窗口**，会丢弃所有短于 W+F 的序列——24128 条 stride-16 训练序列（长度中位 27、均值 30.3、最长 89）里只有 **0.8% 到得了 82 帧**，官方训练器只能拿到约 500 个 clip，等于没有。（`context_frames` 后来因 LPWM 显存降到 32，此时官方采样能留下 26% 的序列、12.4 万个 clip，但仍然只训练满长度 W 的历史，而评测时的历史中位数只有 5–21 帧。）官方 `inference()` 本身支持更短历史（把历史**右对齐**到时间表末尾）。因此训练改成与官方推理一致：变长历史、右对齐、批内同长度、无填充 token（`owm/wm/cjepa_predictor_ext.py`，子类，参数/ state_dict 与官方完全相同）。另两点：官方 `get_mask_indices` 每次用固定种子重建 RNG → 被掩码的 slot 下标永远不变（默认保持官方行为，`mask_sampling: random` 可改）；`dim_head` 参数在官方代码里未被使用（实际 head dim = 128/16 = 8）。 |
 | 11 | LPWM 只用先验 rollout | `sample_from_x(hist, cond_steps=len, use_all_ctx=False, deterministic=False)`：历史转移用后验（只看历史帧，因果），rollout 每步潜在动作来自 **prior head**。**唯一的泄露路径是 `use_all_ctx=True`**（仓库的动画/指标代码默认开）——适配层不用，且只传 ≤t 的帧。粒子确定性、随机性全部来自潜在动作先验 → 调用前紧挨着设种子。关键点 `z_pos` 是 (y,x)∈[-1,1]。 |
 | 12 | LPWM 80 帧显存 | **放不下**。实测（batch 1，fp32，46 GB 卡）：256px/64 粒子：12 帧 19.0 GiB，20 帧 30.1 GiB（≈1.4 GiB/帧，上限约 30 帧）；128px：24 帧 20.4 GiB。82 帧在两种分辨率下都 OOM。另外仓库**没有 256px 配置**，bridge 是 128px；256px 必须改 CNN 通道设置才能建模（见第 4 节）。 |
 | 13 | 动作条件配置项 | LPWM：`action_condition/action_dim`，动作 = `batch[1]`（经 AdaLN 进入 context 模块）；C-JEPA 官方做法是把动作/本体感知当作额外 slot token（`MaskedSlot_AP_Predictor`）。两者都已实现（`--actions`）。 |
@@ -223,17 +265,97 @@ python scripts/p8_tables.py --actions
 **D. 其余**
 1. **C-JEPA 训练用变长右对齐历史**代替"前端填充 + 掩码"（见 ⚠️10）。W=80 超出论文测试范围，报告中需注明。
 2. **`num_slots = 20`**（不是 12）：P2 实测 n_max = 17（VideoRepick 困难档 15 个方块 + 按钮 + 机械臂），规格规则 N = n_max + 3。
-3. **LPWM 上下文长度**：80 帧训练不了（⚠️12）。规格的后备是"两个模型同时缩短"，**需要你决定**：
-   (a) 256px：`context_frames ≈ 24`（`timestep_horizon = context + 4 − 1 = 27`，28 帧 ≈ 41 GiB）；(b) 128px 官方 bridge 设置：`context_frames ≈ 40–45`；(c) 多卡只分摊 batch、不省单样本显存；`--mixed_precision bf16` 可再探（未验证数值稳定性）。
-   改 `experiment.yaml → temporal.context_frames` 一处即可，两个模型、Astra 的历史帧数都跟着变。各任务 stride-16 序列长度：均值 13–43 帧、最长 ~70 帧；
-   Unmask 类任务"方块可见"只在最前面 2 个采样帧 → 上下文短于 episode 长度时关键事件会掉出窗口，报告里要写清楚窗口覆盖情况。
-   256px 配置相对 bridge.json 的必要改动：`patch_size 32` + `n_kp_prior 64`（`n_kp_prior` 必须等于 (image/patch)²）、`anchor_s 0.125`、`bg_ch_mult` 6 级；无条件；`eval_im_metrics/ctx_for_eval` 关闭（后者用真值未来）。
-4. **VideoSAUR 缩放用官方 transform 的 bicubic**（规格写 bilinear）：训练与提取一致更重要；`h_flip_prob 0.5` 保留官方值。
-5. **预测检查**：VideoUnmask / VideoUnmaskSwap / ButtonUnmaskSwap / MoveCube **没有**非关键的指针决策（MoveCube 无任何需要参数的选项）→ 只能报"样本不足"，
+3. **LPWM 基础配置改用官方 `panda.json`**（规格写的是"官方仓库中 256 分辨率、机器人桌面数据的配置"）。
+   最初用 `bridge.json`，训练 5 个 epoch 后出现两个问题：**粒子坍缩**（`on_l1` 从 61.6/64 掉到 0.5，规格 7.3 明确禁止接近 0）
+   和**显存 OOM**（峰值 42.1 GiB，炸在 LPIPS 的 VGG 前向里）。`panda.json` 是 LPWM 官方的 **Franka Panda 桌面**配置，
+   与 RoboMME 同一个机器人、同一类场景，且恰好针对这两点：
+
+   | 参数 | bridge | **panda** | 作用 |
+   |---|---|---|---|
+   | `learned_bg_feature_dim` | 6 | **2** | 背景表达能力弱 → 粒子必须去解释物体，不会被"背景解释一切"挤掉 |
+   | `beta_obj` / `beta_kl` | 0.08 / 0.08 | **0.04 / 0.04** | 关闭粒子的压力减半 |
+   | `beta_dyn` | 0.2 | 0.1 | — |
+   | `recon_loss_type` | vgg | **mse** | 不跑 VGG 前向，**显存降约 40%** |
+   | `learned_feature_dim` / `n_kp_enc` / `topk` | 6 / 50 / 20 | 4 / 25 / 10 | — |
+
+   关掉 panda 自带的 `image_goal_condition`、`n_views: 2`（RoboMME 只有前视一路），保持无条件。
+
+4. **上下文长度 80 → 32**（⚠️12）。规格 7.2 的处理是"**两个模型同时缩短到同一长度**"，所以两边都用 32。
+   改 `experiment.yaml → temporal.context_frames` 一处即可：C-JEPA 预测器的 W、LPWM 的 `timestep_horizon`(= 32+4−1 = 35)、
+   评测历史窗口、Astra 的历史帧数全部由它推导，**不需要分别设置**，公平性由构造保证（两个模型看到同一批采样帧）。
+
+   LPWM 实测（batch 1，空闲卡 44.4 GiB 可用）：
+
+   | 配置 | 训练片段 | 峰值 | 结果 |
+   |---|---|---|---|
+   | bridge（vgg） | 28 帧 | 41.2 GiB | 通过但余量极小，实跑第 5 epoch OOM |
+   | bridge（vgg） | 32 帧 | — | OOM |
+   | **panda（mse）** | 28 帧 | 25.3 GiB | 通过 |
+   | **panda（mse）** | 32 帧 | 28.7 GiB | 通过 |
+   | **panda（mse）** | **36 帧（= 本设置）** | **32.1 GiB** | **通过，余量约 12 GiB** |
+
+   **窗口覆盖率**（规格要求随结果一并报告）—— 记忆关键决策中，历史能追溯到 episode 开头的比例：
+
+   | 任务 | 需要帧数（最大） | 覆盖率 |
+   |---|---|---|
+   | VideoUnmask | 5 | 100% |
+   | VideoUnmaskSwap / ButtonUnmaskSwap | 14 | 100% |
+   | MoveCube | 19 | 100% |
+   | VideoRepick | 25 | 100% |
+   | **PickXtimes** | 58 | **82%** |
+
+   PickXtimes 的记忆关键决策要数清做过几轮，第 4、5 轮必须看回 episode 开头 —— 那 18% 的决策**在结构上就不可能答对**，
+   这是窗口限制而不是"记不住"，结论里必须写明。其余五个任务完全不受影响。
+
+   256px 相对官方 panda.json（128px）的必要改动，均经实测验证：`patch_size 32` + `n_kp_prior 64`
+   （`n_kp_prior` 必须等于 (image/patch)²）、`anchor_s 0.125`、`bg_ch_mult` 扩到 6 级（256 / 2⁵ = 8 = `bg_res_from_fc`）；
+   `eval_im_metrics` / `ctx_for_eval` 关闭（后者会用真值未来帧）。
+
+5. **VideoSAUR 的 `SIM_TEMP` 0.25 → 0.02**（时间相似度损失的温度）。这是**偏离预注册的改动，必须在报告里说明**。
+
+   用官方值训练 100k 步后，`loss_timesim` 只从 5.7814 降到 **5.7676**，几乎没动。查下来**不是优化失败，而是目标分布本身没有信息**：
+
+   | | 值 |
+   |---|---|
+   | 目标分布的熵 | 5.767 |
+   | 均匀分布 ln(324) | 5.781 |
+   | 训练 100k 步达到的 loss | **5.7676** ← 等于目标熵，已是理论下界 |
+
+   交叉熵的下界就是目标的熵，所以模型没有任何下降空间。根因在数据：RoboMME 是固定相机 + 大片同质木纹桌面 + 外观完全相同的灰色容器，
+   相邻帧的 patch 余弦相似度是 **0.878 ± 0.047**（324 个候选全挤在 0.2 宽的带子里），除以温度 0.25 后 softmax 几乎是均匀的。
+   VideoSAUR 论文用的 MOVi / YTVIS 物体外观差异大，这个信号才有指向性。
+   （已排除是我们 stride-16 时间下采样的锅：stride=1 时目标熵同样是 5.768。）
+
+   **含义**：官方温度下 VideoSAUR 退化成 DINOSAUR —— 论文的核心创新（时间特征相似度）没有参与训练，只有特征重建在起作用。
+   如果就这样往下走，"C-JEPA 记不住"这个结论会有歧义：到底是 C-JEPA 架构不行，还是喂给它的编码器根本不是论文里那个 VideoSAUR？
+
+   实测扫描（只依赖冻结的 DINOv2，与训练无关）：
+
+   | SIM_TEMP | 目标熵 | 等效候选数 exp(H) | top-1 概率 |
+   |---|---|---|---|
+   | 0.25（官方） | 5.766 | **319 / 324** | 0.0049 |
+   | 0.1 | 5.689 | 296 | 0.0092 |
+   | 0.05 | 5.425 | 227 | 0.0234 |
+   | **0.02（本设置）** | **4.047** | **57** | **0.1478** |
+   | 均匀分布参照 | 5.781 | 324 | 0.0031 |
+
+   配置里的另一个旋钮 `threshold: 0.0` **完全无效**（相似度最小值 0.778，0.5 / 0.7 一个值都屏蔽不掉），温度是唯一有效的。
+
+   **理由**：温度是随数据相似度尺度而定的量纲参数，换数据集本来就需要重标定；保留一个可证明零信息的损失项，比调整它更偏离论文的本意。
+   这个改动还有望改善 slot 身份稳定性（见下条），而那正是 C-JEPA 身份锚点机制的前提。
+   **理想做法是两个温度各训一次做对照**；只能训一次的话，报告中要明确写出官方温度下该损失项无效。
+
+6. **VideoSAUR 的 slot 身份会在帧间漂移**（观察，非改动）。用掩码 IoU 匹配测得的稳定率（相邻采样帧之间，某个 slot 与自己的 IoU 是否高于与其他 slot）：
+   VideoUnmask 78%、VideoUnmaskSwap 70%、VideoRepick 67%、MoveCube 46%。
+   C-JEPA 的"身份锚点"假设第 k 个 slot 在整段历史里对应同一物体，约 30% 的漂移率意味着预测器要在身份不断跳变的输入上学记忆。
+   这是 C-JEPA 在这个数据上的真实处境，不是实现 bug，但解读结果时必须一并说明。
+
+7. **VideoSAUR 缩放用官方 transform 的 bicubic**（规格写 bilinear）：训练与提取一致更重要；`h_flip_prob 0.5` 保留官方值。
+8. **预测检查**：VideoUnmask / VideoUnmaskSwap / ButtonUnmaskSwap / MoveCube **没有**非关键的指针决策（MoveCube 无任何需要参数的选项）→ 只能报"样本不足"，
    规则 3/4 在这四个任务上无法区分（表中给 `no_memory_signal_check_insufficient`）。只有 PickXtimes（测试集 50 个）和 VideoRepick（45 个）能做预测检查。
-6. 决策帧排除视频段内的分界和结尾 "All tasks completed" 分界（⚠️1）。目标匹配失败（>20px）全部发生在 `memory_secondary`（第二次拿取时目标容器被机械臂挡住，可见像素 <20）；记忆关键决策 0 失败。
-7. LPWM 证据 token 不含背景粒子；测试演示不注入 failure-recovery；Astra 保存的请求里图像以 (episode, 帧号) 引用而非 base64。
-8. 读出头的预测按 `predictions/<task>__<cond>__<split>.parquet` 分文件保存，可以按任务在多张卡上并行训练（`--tasks`）。
+9. 决策帧排除视频段内的分界和结尾 "All tasks completed" 分界（⚠️1）。目标匹配失败（>20px）全部发生在 `memory_secondary`（第二次拿取时目标容器被机械臂挡住，可见像素 <20）；记忆关键决策 0 失败。
+10. LPWM 证据 token 不含背景粒子；测试演示不注入 failure-recovery；Astra 保存的请求里图像以 (episode, 帧号) 引用而非 base64。
+11. 读出头的预测按 `predictions/<task>__<cond>__<split>.parquet` 分文件保存，可以按任务在多张卡上并行训练（`--tasks`）。
 
 ---
 
@@ -328,8 +450,8 @@ VideoRepick 困难档（15 个方块、间距约 4 cm）读出头学不会，而
 | job_type | group | 记录内容 |
 |---|---|---|
 | `videosaur` | `videosaur_robomme` | 官方 Lightning logger（loss_featrec / loss_timesim / 验证损失），TensorBoard 和 CSV 仍然照常写 |
-| `cjepa_predictor` | `cjepa/<tag>` | `train_loss`、`train_future_mse`、`train_masked_history_mse`、`val_future_mse`、每 epoch 耗时 |
-| `lpwm` | `lpwm` | 仓库自己那套每 epoch 指标（各项 KL、`on_l1`、PSNR、LPIPS）+ `val/loss` |
+| `cjepa_predictor` | `cjepa/<tag>` | 每步 `step_loss`、`step_future_mse`、`step_masked_history_mse`（`--log-every N` 可抽稀）；每 epoch `train_loss`、`train_future_mse`、`train_masked_history_mse`、`val_future_mse`、耗时。终端是 tqdm 进度条（多卡只有 rank 0 画） |
+| `lpwm` | `lpwm` | 每 25 步 `step/*`（loss、rec、kl、`on_l1` 等，取自仓库进度条的 postfix）；每 epoch `train/*`（仓库自己那套各项 KL、PSNR、LPIPS）、`train/on_l1`（该 epoch 的均值）和 `val/loss`，三者落在同一个 step 上 |
 | `readout` | `<任务>/<条件>` | 每 100 步的 train/val loss，结束时把 `test/acc_main` 等写进 summary，3 个种子同组便于对比 |
 
 实现方式：`owm/wandb_utils.py` 统一初始化；LPWM 那边通过包住仓库自己的 `format_epoch_summary` / `log_line` 取数（**没有改 LPWM 仓库**）；VideoSAUR 由 `scripts/p5b_train_videosaur.sh` 把 `experiment.yaml` 里的 wandb 设置透传成命令行覆盖。wandb 挂了或没装都只打印一行提示，不会中断训练。
@@ -344,6 +466,17 @@ WANDB_MODE=offline <任何命令>      # 断网时先存本地，之后 wandb sy
 ---
 
 ## 7. 小贴士
+
+**并行策略总览**
+
+| 训练 | 并行方式 | 命令 |
+|---|---|---|
+| VideoSAUR (5b) | Lightning DDP，卡数由 `CUDA_VISIBLE_DEVICES` 决定，每卡 batch 自动除 | `CUDA_VISIBLE_DEVICES=2,3,4 bash scripts/p5b_train_videosaur.sh` |
+| C-JEPA 预测器 (5d) | torchrun DDP，`--batch-size` 自己除以卡数 | `torchrun --nproc_per_node=3 -m owm.wm.train_cjepa_predictor --batch-size 11` |
+| LPWM (P6) | 仓库自带 accelerate | `accelerate launch --num_processes 3 -m owm.wm.lpwm_train --accelerate` |
+| 读出头 (P4/P8) | **不用 DDP**，按任务铺开 | 每张卡一个 `--tasks <Task>` 进程 |
+
+- P5 和 P6 是两条独立的线，可以在不同卡上同时跑；考虑到 DDP 加速比通常只有 2.5× 左右（DINOv2 前向占大头 + 通信开销），"单卡跑 VideoSAUR + 另一张卡跑 LPWM"往往比"三卡 DDP 跑 VideoSAUR 再跑 LPWM"总时间更短，而且没有任何配方偏离的风险。
 - 读出头可按任务并行：`CUDA_VISIBLE_DEVICES=k python scripts/p4_train_readout.py --conditions ... --tasks <Task>`（预测按任务/条件分文件保存，互不冲突）。6 任务 × 2 条件 × 3 种子在 5 张卡上约 40 min。
 - 想完全回到规格原始设置做对照：`readout.fourier_freqs: 16`、`readout.resample_ids: false`、`readout.aug_offsets: []`、`temporal.future_offsets: [16, 32]`、`stats.exclude: {}`。
 - 改了 `future_offsets` / `aug_offsets` / 决策规则后要重建索引：`python scripts/p2_gt.py --report-only`；改了 `future_offsets` 或 `context_frames` 后世界模型要重训、证据要重提。

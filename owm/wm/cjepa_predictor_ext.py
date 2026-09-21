@@ -4,8 +4,10 @@ Findings on the stock code (cjepa/src/cjepa_predictor.py):
   * `time_pos_embed` is a learned table of length history_frames + pred_frames -> W = 80, F = 2 just works
     (82 x N tokens, full attention); there is no other max-length constant.
   * there is NO padding-mask support, and the stock from-slot trainer drops every video shorter than W + F
-    sub-sampled frames. At stride 16 every RoboMME episode is shorter than 82 frames (<= ~70), so the stock
-    trainer would see zero training clips.
+    sub-sampled frames. This was asked for the spec's W = 80: at stride 16 only 0.8% of the 24128 training
+    sequences reach 82 frames (max 89), i.e. ~500 clips — effectively nothing. `context_frames` later dropped
+    to 32 (LPWM memory, spec 7.2), where the stock sampler would keep 26% of the sequences / 124k clips, so the
+    argument is no longer "zero samples" but "74% of the data thrown away and short histories never trained".
   * the stock `inference()` already accepts a shorter history by RIGHT-ALIGNING it on the time table
     (`time_pos_embed[:, -T_total:]`) with the earliest given frame as the identity anchor.
 
@@ -82,10 +84,15 @@ class VarLenMaskedSlotPredictor(MaskedSlotPredictor):
         return out[:, x.shape[1]:]
 
 
+def unwrap(model):
+    """The underlying module — `model` may be a DistributedDataParallel wrapper, which does not proxy attributes."""
+    return getattr(model, "module", model)
+
+
 def cjepa_loss(model: VarLenMaskedSlotPredictor, clip: torch.Tensor) -> dict:
     """Official loss (train_causalwm_from_clevrer_slot.compute_loss): MSE on the masked history slots
     (anchor frame included, as in the official code) + MSE on all future slots."""
-    F_ = model.pred_frames
+    F_ = unwrap(model).pred_frames
     hist, target = clip[:, :-F_], clip[:, -F_:]
     pred, masked = model(hist)
     T_h = hist.shape[1]

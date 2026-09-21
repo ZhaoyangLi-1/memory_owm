@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from owm.wm.actions import ACTION_TOKEN_DIM
-from owm.wm.cjepa_predictor_ext import VarLenMaskedSlotPredictor
+from owm.wm.cjepa_predictor_ext import VarLenMaskedSlotPredictor, unwrap
 
 
 class ActionVarLenPredictor(VarLenMaskedSlotPredictor):
@@ -65,7 +65,7 @@ class ActionVarLenPredictor(VarLenMaskedSlotPredictor):
 
 
 def cjepa_action_loss(model: ActionVarLenPredictor, clip, act) -> dict:
-    F_ = model.pred_frames
+    F_ = unwrap(model).pred_frames
     hist, target = clip[:, :-F_], clip[:, -F_:]
     pred, masked = model(hist, act)
     T_h = hist.shape[1]

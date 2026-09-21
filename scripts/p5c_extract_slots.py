@@ -46,7 +46,8 @@ def main():
     out = Path(a.out) if a.out else cache_dir() / "slots" / "wm_train_slots.pkl"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as f:
-        pickle.dump(dict(data, meta=dict(ckpt=str(vs.ckpt), num_slots=vs.num_slots, stride=stride, offsets=offsets)), f)
+        pickle.dump(dict(data, meta=dict(ckpt=str(vs.ckpt), num_slots=vs.num_slots, stride=stride, offsets=offsets,
+                                         aligned=True)), f)   # vs.encode() returns index-aligned slots
     print({k: len(v) for k, v in data.items()}, "->", out)
 
 

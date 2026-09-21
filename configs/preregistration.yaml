@@ -33,14 +33,47 @@ statistics:
   chance: {pointer: "mean of 1/n_candidates", label: "majority-class share in the training set"}
   wm_seeds: "1; train a 2nd seed and pool if CI(S) straddles 0 or 0.5"
 
+# Symmetric acceptance protocol for the two world models (spec 7.3, extended). Registered BEFORE any world-model
+# condition was evaluated. Every check below is INTRINSIC (self-supervised losses, latent statistics, visualisations);
+# downstream decision accuracy must never influence a hyper-parameter choice or a checkpoint choice.
+# Both models get the same treatment: a check that fails triggers the fixed remedy ladder, and every step actually
+# taken is reported. If a remedy is exhausted without passing, the model is reported AS IS with the failure stated.
+wm_acceptance:
+  applies_to_both:
+    validation_plateau: "relative change of the self-supervised validation loss over the last 10% of training < 2%"
+    future_perturbation: "100% of sampled decisions identical after replacing all frames (and actions) after t with noise"
+    decomposition_visual: "cubes / containers / button / target / arm end up in different slots resp. particles"
+  cjepa_videosaur:
+    informative_timesim:
+      check: "loss_timesim must fall at least 0.5 nat below the entropy of its own target distribution's starting point"
+      why: "at the official SIM_TEMP=0.25 the target entropy is 5.767 vs uniform 5.781 — the term provably carries no
+             information on RoboMME and VideoSAUR degenerates to DINOSAUR (RUN.md section 4 D.5)"
+      remedy_ladder: ["SIM_TEMP 0.25 -> 0.02 (taken)", "SIM_TEMP -> 0.01", "report as degenerate and state it"]
+    slot_usage: ">= 3 slots used per frame (arg-max masks), background slot < 99% of the image"
+  lpwm:
+    particle_occupancy:
+      check: "on_l1 (mean number of visible particles) in [5, 20] of M = 64 after warmup"
+      why: "spec 7.3 forbids on_l1 near 0 or near M; with the bridge config it collapsed 61.6 -> 0.5 (RUN.md 4 D.3)"
+      remedy_ladder: ["base config bridge -> official panda (taken)", "beta_obj 0.04 -> 0.02", "beta_obj -> 0.0
+                       (official langtable value)", "report as collapsed and state it"]
+    latent_action_alive:
+      check: "KL Context and KL Dynamics both non-zero (the latent-action module is used)"
+      why: "analogue of the timesim check — the paper's core mechanism must actually fire"
+      remedy_ladder: ["report as degenerate and state it"]
+    report_only:
+      check: "KL Scale / KL Depth were ~0 with the bridge config (posterior collapse of scale and depth)"
+      action: "no remedy; measure again after the panda run and state it in the limitations either way"
+  reporting: "every check, its value, and every remedy step taken are listed in the report for BOTH models, so that a
+              degenerate mechanism is never silently attributed to the architecture"
+
 fixed_variables:
   wm_input: front_rgb only (no actions, proprioception, language)
-  temporal: {stride: 16, train_offset: random, eval: backward from the decision frame, context_frames: 80, future: [t+16, t+32, t+48, t+64]}   # K raised 2 -> 4 by reading rule 1 BEFORE any world-model result existed (RUN.md 4A)
+  temporal: {stride: 16, train_offset: random, eval: backward from the decision frame, context_frames: 32, future: [t+16, t+32, t+48, t+64]}   # K raised 2 -> 4 by reading rule 1, context 80 -> 32 by the LPWM memory limit, both BEFORE any world-model result existed (RUN.md 4A / 4 D.4)
   candidates: GT visible objects at frame t, identical in all conditions
   hyperparameters: official configs; only the items listed in spec section 3 change
   wm_checkpoint: last checkpoint after the self-supervised validation loss has plateaued; never chosen by downstream accuracy
   readout: identical architecture/training in all conditions; checkpoint = lowest validation loss
-  cjepa_note: "history window 80 (official: 3 / 6) is outside the range tested in the paper — must be stated in every report"
+  cjepa_note: "history window 32 (official: 3 / 6) is outside the range tested in the paper — must be stated in every report"
   astra: {model: gpt-6-astra, reasoning_effort: high, calls_per_decision: 1, retries: 2}
 
 expectations:

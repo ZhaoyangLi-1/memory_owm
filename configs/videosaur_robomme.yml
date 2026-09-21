@@ -7,7 +7,7 @@ experiment_group: videosaur_robomme
 experiment_name: robomme_dinov2
 
 globals:
-  NUM_SLOTS: 12           # N = n_max + 3 (scripts/p2_gt.py); override on the command line
+  NUM_SLOTS: 20           # N = n_max + 3；P2 实测 n_max = 17（VideoRepick 困难档 15 方块 + 按钮 + 机械臂）
   SLOT_DIM: 128
   DINO_MODEL: vit_small_patch14_dinov2.lvd142m
   FEAT_DIM: 384
@@ -17,7 +17,13 @@ globals:
   TOTAL_BATCH_SIZE: "${mul: ${.NUM_GPUS}, ${.BATCH_SIZE_PER_GPU}}"
   BASE_LR: 0.0001
   SIM_WEIGHT: 0.25
-  SIM_TEMP: 0.25
+  # 官方 0.25。RoboMME 上相邻帧的 patch 余弦相似度是 0.878 ± 0.047（324 个候选挤在 0.2 宽的带子里），
+  # 除以 0.25 后 softmax 几乎是均匀的：目标熵 5.766 vs 均匀 ln(324)=5.781，等效候选数 319/324。
+  # 于是 loss_timesim 的理论下界就是它自己的熵，实测训练 100k 步只从 5.781 降到 5.7676 —— VideoSAUR 的
+  # 核心机制（时间特征相似度）完全没生效，退化成 DINOSAUR。温度是随数据尺度而定的量纲参数，换数据集需重标定。
+  # 实测扫描：0.25 -> 等效候选 319 | 0.1 -> 296 | 0.05 -> 227 | 0.02 -> 57（top-1 概率 0.15，目标有指向性）
+  # threshold 无效（相似度最小值 0.778，0.5/0.7 屏蔽不到任何值），温度是唯一有效旋钮。详见 RUN.md 第 4 节 D.5。
+  SIM_TEMP: 0.02
 
 wandb:            # project / entity / mode / enable are overridden by scripts/p5b_train_videosaur.sh
                   # from configs/experiment.yaml -> wandb, so all trainings share one setting

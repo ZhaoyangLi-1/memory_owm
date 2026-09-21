@@ -33,7 +33,13 @@ temporal:
   stride: 16
   train_offset: random         # offset in [0, stride-1]
   eval_alignment: backward_from_decision
-  context_frames: 80
+  context_frames: 32           # 规格为 80，但 LPWM 放不下。规格 7.2 的处理是「两个模型同时缩短到同一长度」，两边都用 32。
+                               # 这一个值同时决定 C-JEPA 预测器的 W 和 LPWM 的 timestep_horizon(=32+3)，无需分别设置。
+                               # LPWM 实测（panda 配置、256px、batch 1、空闲卡 44.4 GiB 可用）：
+                               #   28 帧片段 25.3 GiB / 32 帧 28.7 GiB / 36 帧 32.1 GiB（= 本设置，留约 12 GiB 余量）
+                               #   旧的 bridge 配置用 VGG 感知损失，28 帧就要 41.2 GiB、32 帧 OOM
+                               # 窗口覆盖率（记忆关键决策中历史能追溯到 episode 开头的比例，见 RUN.md 第 4 节 D.3）：
+                               # 其余五个任务 100%（VideoRepick 100%），PickXtimes 82%
   future_offsets: [16, 32, 48, 64]   # K = 4. Spec default was [16, 32]; reading rule 1 fired: with K = 2 the REAL future identifies the
                                # answer in only 65% (ButtonUnmaskSwap) / 79% (VideoRepick) / 64% (MoveCube) of the cases (oracle rule,
                                # RUN.md section 4A), at t+64 in 100 / 98 / 94%. Applies to all conditions and both world models.
@@ -49,7 +55,9 @@ cjepa:
   aux_action: false
   aux_proprio: false
   predictor: {depth: 6, heads: 16, dim_head: 64, mlp_dim: 2048, dropout: 0.1}
-  train: {batch_size: 32, lr: 5.0e-4, max_epochs: 30, steps_per_epoch: 2000, num_workers: 4, seed: 0}
+  train: {batch_size: 32, lr: 5.0e-4, max_epochs: 30, steps_per_epoch: null, num_workers: 4, seed: 0}
+  # steps_per_epoch: null = 一个 epoch 过完整个 clip 集合（每条序列 x 每个历史长度 T_h 各一次，batch 32 下约 16k 步）；
+  #                  填整数 = 旧行为，每个 epoch 随机采样这么多个 batch
   slot_offsets: all            # offsets (0..stride-1) at which train slots are extracted; "all" or a list
 
 lpwm:

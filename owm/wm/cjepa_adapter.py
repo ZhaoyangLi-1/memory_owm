@@ -27,7 +27,8 @@ class CJepaAdapter:
         self.cfg, self.device, self.with_actions = cfg, device, with_actions
         self.vs = VideoSaur(videosaur_ckpt, device=device)
         tag = "actions" if with_actions else "main"
-        ck = Path(predictor_ckpt) if predictor_ckpt else output_dir() / "cjepa_predictor" / tag / "final_predictor.ckpt"
+        # best = lowest validation future-MSE; the last epoch can be over-fitted (it was, 3x worse, in the first run)
+        ck = Path(predictor_ckpt) if predictor_ckpt else output_dir() / "cjepa_predictor" / tag / "best_predictor.ckpt"
         if with_actions:
             from owm.wm.cjepa_action import build_action_predictor
             self.model = build_action_predictor(self.vs.num_slots, cfg, device)
