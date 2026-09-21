@@ -294,10 +294,15 @@ RUN set -e; \
               && git -C "$2" fetch -q --depth 1 origin "$3" && git -C "$2" checkout -q FETCH_HEAD; }; \
     clone https://github.com/ZhaoyangLi-1/robomme_benchmark.git /workspace/robomme_benchmark "$ROBOMME_COMMIT"; \
     clone https://github.com/ZhaoyangLi-1/cjepa.git /workspace/cjepa "$CJEPA_COMMIT"; \
-    clone https://github.com/ZhaoyangLi-1/lpwm.git /workspace/lpwm "$LPWM_COMMIT"; \
-    pip install --no-cache-dir --no-deps -e /workspace/robomme_benchmark; \
-    pip check; \
-    python -c "import cv2, h5py, torch, torchvision, sapien, mani_skill, mplib, robomme, transformers, timm, \
+    clone https://github.com/ZhaoyangLi-1/lpwm.git /workspace/lpwm "$LPWM_COMMIT"
+# The committed robomme pyproject.toml pins torch 2.9.1 / torchvision 0.24.1; the host's clone carries an uncommitted
+# edit that pins the versions this env runs (2.6.0 / 0.21.0). Only the package metadata differs (installed --no-deps,
+# no code changes); without the same edit `pip check` reports the two pins.
+RUN sed -i 's/"torch==2.9.1"/"torch==2.6.0"/; s/"torchvision==0.24.1"/"torchvision==0.21.0"/' \
+        /workspace/robomme_benchmark/pyproject.toml \
+    && pip install --no-cache-dir --no-deps -e /workspace/robomme_benchmark
+RUN pip check \
+    && python -c "import cv2, h5py, torch, torchvision, sapien, mani_skill, mplib, robomme, transformers, timm, \
 pytorch_lightning, accelerate, webdataset, wandb, openai; print('imports ok, torch', torch.__version__)"
 
 # pretrained weights fetched at run time on the host: DINOv2-small (VideoSAUR encoder, videosaur/modules/encoders.py)
