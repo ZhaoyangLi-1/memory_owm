@@ -2,7 +2,8 @@
 # It pins the interpreter and builds a clean PYTHONPATH (the login shell's PYTHONPATH contains a package named
 # `utils` that shadows LPWM's `utils/`, so it must not leak into these runs).
 export OWM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export OWM_PY=/common/home/zl1308/data/conda/envs/memory_owm/bin/python
+# the Docker image sets OWM_PY to its own copy of the env (docker/Dockerfile); on the host the default is used
+export OWM_PY="${OWM_PY:-/common/home/zl1308/data/conda/envs/memory_owm/bin/python}"
 export CJEPA_ROOT=/common/home/zl1308/Projects/cjepa
 export LPWM_ROOT=/common/home/zl1308/Projects/lpwm
 export PYTHONPATH="$OWM_ROOT"
